@@ -15,6 +15,21 @@
 
 ## 설치 방법
 
+### 방법 1. Windows EXE 간편 설치 (Python 불필요)
+
+1. [Releases](https://github.com/hoisungko-dotcom/kospi_trading/releases/latest) 페이지에서 두 파일 다운로드
+   - 
+   - 
+2. 두 파일을 **같은 폴더**에 저장
+3.  파일을  로 이름 변경 후 KIS API 키 입력
+4.  실행
+
+> 실행 후 같은 폴더에 ,  폴더가 자동 생성됩니다.
+
+---
+
+### 방법 2. Python 소스코드 설치
+
 ### 1. Python 설치
 
 Python 3.11 이상이 필요합니다.  
