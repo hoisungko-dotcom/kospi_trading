@@ -18,13 +18,13 @@
 ### 방법 1. Windows EXE 간편 설치 (Python 불필요)
 
 1. [Releases](https://github.com/hoisungko-dotcom/kospi_trading/releases/latest) 페이지에서 두 파일 다운로드
-   - 
-   - 
+   - `KOSPI_AutoTrade.exe`
+   - `env.example`
 2. 두 파일을 **같은 폴더**에 저장
-3.  파일을  로 이름 변경 후 KIS API 키 입력
-4.  실행
+3. `env.example` 파일을 `.env` 로 이름 변경 후 KIS API 키 입력
+4. `KOSPI_AutoTrade.exe` 실행
 
-> 실행 후 같은 폴더에 ,  폴더가 자동 생성됩니다.
+> 실행 후 같은 폴더에 `logs/`, `data/` 폴더가 자동 생성됩니다.
 
 ---
 
