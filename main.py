@@ -8,6 +8,15 @@ KOSPI 6 + KOSDAQ 4 집중 거래 시스템
 """
 import os
 import sys
+
+# Windows 한글 인코딩 오류 방지 (cp1252 → utf-8)
+if sys.platform == 'win32':
+    os.environ.setdefault('PYTHONUTF8', '1')
+    if hasattr(sys.stdout, 'reconfigure'):
+        sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+    if hasattr(sys.stderr, 'reconfigure'):
+        sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+
 import json
 import time
 import signal
