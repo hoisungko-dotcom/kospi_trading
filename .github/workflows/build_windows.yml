@@ -1,0 +1,41 @@
+name: Windows EXE 빌드
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: 코드 체크아웃
+        uses: actions/checkout@v4
+
+      - name: Python 설치
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: 패키지 설치
+        run: |
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: EXE 빌드
+        run: |
+          pyinstaller --onefile --console --name "KOSPI_자동매매" main.py
+
+      - name: GitHub Releases 업로드
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: "KOSPI 자동매매 최신버전"
+          body: |
+            ## 설치 방법
+            1. `KOSPI_자동매매.exe` 다운로드
+            2. `.env.example` 파일을 `.env` 로 복사 후 KIS API 키 입력
+            3. `KOSPI_자동매매.exe` 실행
+          files: dist/KOSPI_자동매매.exe
+          make_latest: true
