@@ -2,17 +2,13 @@ import requests
 import json
 import logging
 import os
-import sys
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-if getattr(sys, 'frozen', False):
-    _TOKEN_CACHE_DIR = Path(sys.executable).parent / "data"
-else:
-    _TOKEN_CACHE_DIR = Path(__file__).parent.parent / "data"
+_TOKEN_CACHE_DIR = Path(__file__).parent.parent / "data"
 
 
 class KISClient:
@@ -382,8 +378,8 @@ class KISClient:
 
     # ── 주문가능금액 ──────────────────────────────────────────────────────
 
-    def get_orderable_cash(self, symbol: str = "005930", price: int = 0) -> float:
-        """KIS API에서 실제 주문가능금액 조회. 실패 시 -1 반환."""
+    def get_orderable_cash(self, symbol: str = "005930", price: int = 0, use_max: bool = False) -> float:
+        """KIS API에서 실제 주문가능금액 조회. use_max=True 시 당일 매도 재사용 포함 최대금액 반환. 실패 시 -1 반환."""
         path  = "/uapi/domestic-stock/v1/trading/inquire-psbl-order"
         tr_id = self.get_tr_id("TTTC8908R")
         url   = f"{self.trade_base_url}{path}"
@@ -401,7 +397,7 @@ class KISClient:
             "PDNO":                  symbol,
             "ORD_UNPR":              str(price),
             "ORD_DVSN":              "00",
-            "CMA_EVLU_AMT_ICLD_YN":  "N",
+            "CMA_EVLU_AMT_ICLD_YN":  "Y",
             "OVRS_ICLD_YN":          "N",
         }
 
@@ -419,7 +415,8 @@ class KISClient:
                 if response.status_code == 200:
                     result = response.json()
                     if result.get("rt_cd") == "0":
-                        return float(result.get("output", {}).get("ord_psbl_cash", 0) or 0)
+                        field = "max_buy_amt" if use_max else "ord_psbl_cash"
+                        return float(result.get("output", {}).get(field, 0) or 0)
                     if result.get("msg_cd") == "EGW00123" and auth_attempt == 0:
                         logger.warning("⚠️ 주문가능금액 토큰 만료 — 재발급 재시도")
                         self._delete_cached_token(self.trade_appkey)

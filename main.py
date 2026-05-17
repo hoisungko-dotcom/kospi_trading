@@ -61,12 +61,7 @@ class _InsufficientFunds(Exception):
     pass
 
 # ── 로깅 ────────────────────────────────────────────────────────────────
-if getattr(sys, 'frozen', False):
-    BASE_DIR = Path(sys.executable).parent
-else:
-    BASE_DIR = Path(__file__).parent
-
-LOG_DIR = BASE_DIR / "logs"
+LOG_DIR = Path(__file__).parent / "logs"
 LOG_DIR.mkdir(exist_ok=True)
 
 logging.basicConfig(
@@ -83,7 +78,7 @@ for _noisy in ("pykrx", "requests", "urllib3"):
 
 logger = logging.getLogger(__name__)
 
-DATA_DIR  = BASE_DIR / "data"
+DATA_DIR  = Path(__file__).parent / "data"
 TOP10_JSON = DATA_DIR / "top_10_daily.json"
 LOCK_FILE = DATA_DIR / "kospi_bot.lock"
 REENTRY_COOLDOWN_JSON = DATA_DIR / "sell_reentry_cooldowns.json"
@@ -119,17 +114,6 @@ def acquire_lock():
             pass
 
     atexit.register(_cleanup)
-
-
-def _prevent_sleep():
-    if sys.platform == 'win32':
-        import ctypes
-        ctypes.windll.kernel32.SetThreadExecutionState(0x80000000 | 0x00000001)
-
-def _allow_sleep():
-    if sys.platform == 'win32':
-        import ctypes
-        ctypes.windll.kernel32.SetThreadExecutionState(0x80000000)
 
 
 _AI_SELL_SYSTEM_PROMPT = (
@@ -1649,8 +1633,8 @@ class KospiTopTenSystem:
 
             cost = quantity * expected_order_price
 
-            # ── KIS API 실제 주문가능금액 확인 (예수금이 아닌 미체결 차감 반영) ──
-            orderable = self.kis_client.get_orderable_cash(symbol, expected_order_price)
+            # ── KIS API 실제 주문가능금액 확인 (당일 매도 재사용 포함 최대 매수가능금액) ──
+            orderable = self.kis_client.get_orderable_cash(symbol, expected_order_price, use_max=True)
             if orderable >= 0:  # 조회 성공
                 if orderable < cost:
                     available_cash = float(self.position_mgr.portfolio.get('cash', 0))
@@ -1956,8 +1940,6 @@ class KospiTopTenSystem:
 
 def main():
     acquire_lock()
-    _prevent_sleep()
-    atexit.register(_allow_sleep)
     logger.info("🧩 코드버전: kospi-v3.2 / profile-classifier / profit-harvest-reentry")
     system = KospiTopTenSystem()
     system.show_balance()

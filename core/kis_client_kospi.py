@@ -169,9 +169,9 @@ class KISClientKospi:
         """단일 종목 분봉 데이터. 실패 시 None."""
         return self._market_data.get_kospi_ohlcv(symbol, interval=interval, lookback=lookback)
 
-    def get_orderable_cash(self, symbol: str, price: float) -> float:
-        """KIS API에서 실제 주문가능금액 조회 (미체결 주문 차감 반영)"""
-        return self._client.get_orderable_cash(symbol=symbol, price=int(price))
+    def get_orderable_cash(self, symbol: str, price: float, use_max: bool = False) -> float:
+        """KIS API에서 실제 주문가능금액 조회 (당일 매도 재사용 포함 최대 매수가능금액)"""
+        return self._client.get_orderable_cash(symbol=symbol, price=int(price), use_max=use_max)
 
     def verify_domestic_fill(
         self,
@@ -239,11 +239,12 @@ class KISClientKospi:
                 logger.warning(f"⚠️ 잔고 조회 응답 이상: {res}")
                 return {}
 
-            # 예수금
+            # 최대 매수가능금액 (당일 매도 재사용 포함) — KIS 앱 표시 잔고와 동일
             output2 = res.get('output2', {})
             if isinstance(output2, list):
                 output2 = output2[0] if output2 else {}
-            cash = float(output2.get('dnca_tot_amt', 0) or 0)
+            max_cash = self._client.get_orderable_cash(symbol="", price=0, use_max=True)
+            cash = max_cash if max_cash > 0 else float(output2.get('dnca_tot_amt', 0) or 0)
 
             # 보유종목
             holdings = {}
