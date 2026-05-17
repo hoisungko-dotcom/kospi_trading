@@ -14,7 +14,11 @@ import signal
 import logging
 import threading
 import atexit
-import fcntl
+import sys as _sys
+if _sys.platform == 'win32':
+    import msvcrt as _lock_mod
+else:
+    import fcntl as _lock_mod
 from datetime import datetime
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -79,7 +83,10 @@ def acquire_lock():
     DATA_DIR.mkdir(exist_ok=True)
     _LOCK_HANDLE = open(LOCK_FILE, "w")
     try:
-        fcntl.lockf(_LOCK_HANDLE, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        if _sys.platform == 'win32':
+            _lock_mod.locking(_LOCK_HANDLE.fileno(), _lock_mod.LK_NBLCK, 1)
+        else:
+            _lock_mod.lockf(_LOCK_HANDLE, _lock_mod.LOCK_EX | _lock_mod.LOCK_NB)
     except OSError:
         logger.critical("🛑 이미 실행 중인 한국주식 봇이 있어 새 실행을 중단합니다.")
         raise SystemExit(1)
@@ -88,7 +95,10 @@ def acquire_lock():
 
     def _cleanup():
         try:
-            fcntl.lockf(_LOCK_HANDLE, fcntl.LOCK_UN)
+            if _sys.platform == 'win32':
+                _lock_mod.locking(_LOCK_HANDLE.fileno(), _lock_mod.LK_UNLCK, 1)
+            else:
+                _lock_mod.lockf(_LOCK_HANDLE, _lock_mod.LOCK_UN)
             _LOCK_HANDLE.close()
             LOCK_FILE.unlink(missing_ok=True)
         except Exception:
