@@ -53,7 +53,14 @@ jobs:
           $env:KIS_ACCOUNT = "00000000-01"
           $exePath = (Get-ChildItem -Path "dist" -Filter "*.exe" | Select-Object -First 1).FullName
           Write-Host "Running: $exePath"
-          Start-Process -FilePath $exePath -RedirectStandardOutput "out.txt" -RedirectStandardError "err.txt" -NoNewWindow -Wait -PassThru
+          $proc = Start-Process -FilePath $exePath -RedirectStandardOutput "out.txt" -RedirectStandardError "err.txt" -NoNewWindow -PassThru
+          $finished = $proc.WaitForExit(15000)
+          if (-not $finished) {
+            Write-Host "EXE running OK - killing after 15s timeout"
+            $proc.Kill()
+          } else {
+            Write-Host "EXE exited with code: $($proc.ExitCode)"
+          }
           Write-Host "--- stdout ---"
           if (Test-Path "out.txt") { Get-Content "out.txt" | Select-Object -First 20 }
           Write-Host "--- stderr ---"
