@@ -23,11 +23,14 @@ jobs:
 
       - name: 패키지 설치
         run: |
-          pip install -r requirements.txt
-          pip install pyinstaller
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          python -m pip install pyinstaller
+          python -c "import pandas; print('pandas OK:', pandas.__version__)"
+          python -c "import numpy; print('numpy OK:', numpy.__version__)"
 
       - name: EXE 빌드
-        run: pyinstaller --onefile --console --name "KOSPI_자동매매" --collect-all pandas --collect-all numpy --collect-all FinanceDataReader --collect-all pykrx --collect-all yfinance --collect-all pytz --collect-all dateutil --collect-all schedule --collect-all rich --collect-all anthropic --collect-all requests --collect-all dotenv main.py
+        run: python -m PyInstaller --onefile --console --name "KOSPI_자동매매" --collect-all pandas --collect-all numpy --collect-all pykrx --collect-all yfinance --collect-all pytz --collect-all python_dateutil --collect-all schedule --collect-all rich --collect-all anthropic --collect-all FinanceDataReader main.py
 
       - name: EXE 파일 확인
         run: |
