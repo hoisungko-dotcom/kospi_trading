@@ -1,0 +1,48 @@
+# 환경 변수 (절대 공유 금지)
+.env
+.env.local
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+venv/
+.venv/
+env/
+*.egg-info/
+dist/
+build/
+
+# 로그 및 데이터 (개인 거래 기록)
+logs/
+data/
+paper_trading_logs/
+*.log
+*.db
+*.sqlite3
+
+# 토큰 캐시
+.token_*.json
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# macOS
+.DS_Store
+*.command
+
+# Claude Code
+.claude/
+
+# PyInstaller
+*.spec
+dist/
+build/
+
+# 아카이브
+archive/
