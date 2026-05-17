@@ -9,7 +9,7 @@ mdurl==0.1.2
 narwhals==2.21.0
 numpy==2.4.5
 packaging==26.2
-pandas==3.0.3
+pandas==2.2.3
 plotly==6.7.0
 pykrx==1.2.7
 Pygments==2.20.0
