@@ -3,13 +3,17 @@
 """
 import sqlite3
 import logging
+import sys
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, List
 
 logger = logging.getLogger(__name__)
 
-DB_PATH = Path(__file__).parent.parent / "data" / "kospi_kosdaq.db"
+if getattr(sys, 'frozen', False):
+    DB_PATH = Path(sys.executable).parent / "data" / "kospi_kosdaq.db"
+else:
+    DB_PATH = Path(__file__).parent.parent / "data" / "kospi_kosdaq.db"
 
 
 class DatabaseManagerKospi:
