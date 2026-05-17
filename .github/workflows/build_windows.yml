@@ -30,16 +30,30 @@ jobs:
         run: |
           pyinstaller --onefile --console --name "KOSPI_자동매매" main.py
 
-      - name: 실행 테스트
+      - name: EXE 파일 확인
+        run: |
+          $exePath = Get-ChildItem -Path "dist" -Filter "*.exe" | Select-Object -First 1
+          if ($exePath) {
+            $sizeMB = [math]::Round($exePath.Length / 1MB, 1)
+            Write-Host "BUILD OK: $($exePath.Name) ($sizeMB MB)"
+          } else {
+            Write-Host "BUILD FAILED: EXE not found"
+            exit 1
+          }
+        shell: powershell
+
+      - name: EXE 실행 테스트
         run: |
           $env:MOCK_TRADING = "true"
           $env:KIS_APPKEY = "test"
           $env:KIS_APPSECRET = "test"
           $env:KIS_ACCOUNT = "00000000-01"
-          $output = & "dist\KOSPI_자동매매.exe" 2>&1 | Select-Object -First 20 | Out-String
-          Write-Host "=== EXE 출력 ==="
+          $exePath = Get-ChildItem -Path "dist" -Filter "*.exe" | Select-Object -First 1
+          Write-Host "Running: $($exePath.FullName)"
+          $output = & $exePath.FullName 2>&1 | Select-Object -First 15 | Out-String
+          Write-Host "--- EXE Output ---"
           Write-Host $output
-          Write-Host "✅ EXE 실행 테스트 완료"
+          Write-Host "--- Test Done ---"
         shell: powershell
         continue-on-error: true
 
