@@ -56,7 +56,7 @@ jobs:
           Write-Host "--- stdout ---"
           if (Test-Path "out.txt") { Get-Content "out.txt" | Select-Object -First 20 }
           Write-Host "--- stderr ---"
-          if (Test-Path "err.txt") { Get-Content "err.txt" | Select-Object -First 30 }
+          if (Test-Path "err.txt") { Get-Content "err.txt" | Select-Object -First 60 }
         shell: powershell
         continue-on-error: true
 
