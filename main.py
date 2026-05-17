@@ -121,6 +121,17 @@ def acquire_lock():
     atexit.register(_cleanup)
 
 
+def _prevent_sleep():
+    if sys.platform == 'win32':
+        import ctypes
+        ctypes.windll.kernel32.SetThreadExecutionState(0x80000000 | 0x00000001)
+
+def _allow_sleep():
+    if sys.platform == 'win32':
+        import ctypes
+        ctypes.windll.kernel32.SetThreadExecutionState(0x80000000)
+
+
 _AI_SELL_SYSTEM_PROMPT = (
     "당신은 국내주식 단타/스윙 매도 전문 AI입니다.\n"
     "하드 손절(-3%)과 트레일링 스톱은 이미 처리됨 — 당신의 역할은 수익 구간(+2%~+15%)에서 최적 익절 타이밍 판단.\n\n"
@@ -1945,6 +1956,8 @@ class KospiTopTenSystem:
 
 def main():
     acquire_lock()
+    _prevent_sleep()
+    atexit.register(_allow_sleep)
     logger.info("🧩 코드버전: kospi-v3.2 / profile-classifier / profit-harvest-reentry")
     system = KospiTopTenSystem()
     system.show_balance()
