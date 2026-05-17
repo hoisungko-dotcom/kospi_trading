@@ -48,12 +48,13 @@ jobs:
           $env:KIS_APPKEY = "test"
           $env:KIS_APPSECRET = "test"
           $env:KIS_ACCOUNT = "00000000-01"
-          $exePath = Get-ChildItem -Path "dist" -Filter "*.exe" | Select-Object -First 1
-          Write-Host "Running: $($exePath.FullName)"
-          $output = & $exePath.FullName 2>&1 | Select-Object -First 15 | Out-String
-          Write-Host "--- EXE Output ---"
-          Write-Host $output
-          Write-Host "--- Test Done ---"
+          $exePath = (Get-ChildItem -Path "dist" -Filter "*.exe" | Select-Object -First 1).FullName
+          Write-Host "Running: $exePath"
+          Start-Process -FilePath $exePath -RedirectStandardOutput "out.txt" -RedirectStandardError "err.txt" -NoNewWindow -Wait -PassThru
+          Write-Host "--- stdout ---"
+          if (Test-Path "out.txt") { Get-Content "out.txt" | Select-Object -First 20 }
+          Write-Host "--- stderr ---"
+          if (Test-Path "err.txt") { Get-Content "err.txt" | Select-Object -First 30 }
         shell: powershell
         continue-on-error: true
 
