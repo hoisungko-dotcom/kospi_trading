@@ -21,8 +21,16 @@
    - `KOSPI_AutoTrade.exe`
    - `env.example`
 2. 두 파일을 **같은 폴더**에 저장
-3. `env.example` 파일을 `.env` 로 이름 변경 후 KIS API 키 입력
-4. `KOSPI_AutoTrade.exe` 실행
+3. `env.example` 파일을 `.env` 로 이름 변경
+
+   **명령 프롬프트(cmd):**
+   ```
+   rename env.example .env
+   ```
+   또는 탐색기에서 `env.example` 우클릭 → 이름 바꾸기 → `.env` 입력
+
+4. `.env` 를 메모장(또는 텍스트 편집기)으로 열어 KIS API 키 입력
+5. `KOSPI_AutoTrade.exe` 실행
 
 > 실행 후 같은 폴더에 `logs/`, `data/` 폴더가 자동 생성됩니다.
 
