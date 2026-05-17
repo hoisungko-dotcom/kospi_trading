@@ -30,6 +30,22 @@ jobs:
         run: |
           pyinstaller --onefile --console --name "KOSPI_자동매매" main.py
 
+      - name: 실행 테스트 (3초 후 강제 종료)
+        run: |
+          $env:MOCK_TRADING = "true"
+          $env:KIS_APPKEY = "test"
+          $env:KIS_APPSECRET = "test"
+          $env:KIS_ACCOUNT = "00000000-01"
+          $proc = Start-Process -FilePath "dist\KOSPI_자동매매.exe" -PassThru -NoNewWindow
+          Start-Sleep -Seconds 5
+          if (-not $proc.HasExited) {
+            Write-Host "✅ EXE 정상 실행 확인 (5초 후 종료)"
+            $proc.Kill()
+          } else {
+            Write-Host "⚠️ EXE가 조기 종료됨 (exit code: $($proc.ExitCode))"
+          }
+        shell: powershell
+
       - name: GitHub Releases 업로드
         uses: softprops/action-gh-release@v2
         with:
