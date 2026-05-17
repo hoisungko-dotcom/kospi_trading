@@ -2,13 +2,17 @@ import requests
 import json
 import logging
 import os
+import sys
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-_TOKEN_CACHE_DIR = Path(__file__).parent.parent / "data"
+if getattr(sys, 'frozen', False):
+    _TOKEN_CACHE_DIR = Path(sys.executable).parent / "data"
+else:
+    _TOKEN_CACHE_DIR = Path(__file__).parent.parent / "data"
 
 
 class KISClient:
