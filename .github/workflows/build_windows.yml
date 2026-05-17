@@ -28,7 +28,20 @@ jobs:
 
       - name: EXE 빌드
         run: |
-          pyinstaller --onefile --console --name "KOSPI_자동매매" main.py
+          pyinstaller --onefile --console --name "KOSPI_자동매매" `
+            --collect-all pandas `
+            --collect-all numpy `
+            --collect-all FinanceDataReader `
+            --collect-all pykrx `
+            --collect-all yfinance `
+            --collect-all pytz `
+            --collect-all dateutil `
+            --collect-all schedule `
+            --collect-all rich `
+            --collect-all anthropic `
+            --collect-all requests `
+            --collect-all dotenv `
+            main.py
 
       - name: EXE 파일 확인
         run: |
