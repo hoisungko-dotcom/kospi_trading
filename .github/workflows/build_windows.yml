@@ -46,6 +46,7 @@ jobs:
 
       - name: EXE 실행 테스트
         run: |
+          $env:PYTHONUTF8 = "1"
           $env:MOCK_TRADING = "true"
           $env:KIS_APPKEY = "test"
           $env:KIS_APPSECRET = "test"
