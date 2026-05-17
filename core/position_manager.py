@@ -1,13 +1,17 @@
 import os
 import json
 import logging
+import sys
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict
 
 logger = logging.getLogger(__name__)
 
-PORTFOLIO_DIR = Path(__file__).parent.parent / "paper_trading_logs"
+if getattr(sys, 'frozen', False):
+    PORTFOLIO_DIR = Path(sys.executable).parent / "paper_trading_logs"
+else:
+    PORTFOLIO_DIR = Path(__file__).parent.parent / "paper_trading_logs"
 
 
 class PositionManager:
