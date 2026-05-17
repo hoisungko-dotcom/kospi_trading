@@ -92,6 +92,25 @@ LIVE_TRADING_CONFIRMED=true
 
 ---
 
+## Claude AI 매도 판단 설정 (선택)
+
+AI가 수익 구간에서 매도 여부를 판단합니다. 없어도 기본 지표 기반으로 동작합니다.
+
+**비용:** Claude Haiku 기준 1회 판단 약 $0.001 미만 → 월 $0.5~1 수준  
+**신규 가입 시 $5 무료 크레딧 제공**
+
+1. [console.anthropic.com](https://console.anthropic.com) 접속 → 회원가입
+2. 좌측 메뉴 **API Keys** → **Create Key**
+3. 생성된 키(`sk-ant-...`)를 복사
+4. `.env` 파일에 입력:
+   ```
+   ANTHROPIC_API_KEY=sk-ant-여기에_키_입력
+   ```
+
+> 키를 입력하지 않으면 AI 판단 없이 지표만으로 매도합니다.
+
+---
+
 ## 텔레그램 알림 설정 (선택)
 
 1. 텔레그램에서 [@BotFather](https://t.me/BotFather) 대화
