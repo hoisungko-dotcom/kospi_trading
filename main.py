@@ -61,7 +61,12 @@ class _InsufficientFunds(Exception):
     pass
 
 # ── 로깅 ────────────────────────────────────────────────────────────────
-LOG_DIR = Path(__file__).parent / "logs"
+if getattr(sys, 'frozen', False):
+    BASE_DIR = Path(sys.executable).parent
+else:
+    BASE_DIR = Path(__file__).parent
+
+LOG_DIR = BASE_DIR / "logs"
 LOG_DIR.mkdir(exist_ok=True)
 
 logging.basicConfig(
@@ -78,7 +83,7 @@ for _noisy in ("pykrx", "requests", "urllib3"):
 
 logger = logging.getLogger(__name__)
 
-DATA_DIR  = Path(__file__).parent / "data"
+DATA_DIR  = BASE_DIR / "data"
 TOP10_JSON = DATA_DIR / "top_10_daily.json"
 LOCK_FILE = DATA_DIR / "kospi_bot.lock"
 REENTRY_COOLDOWN_JSON = DATA_DIR / "sell_reentry_cooldowns.json"
