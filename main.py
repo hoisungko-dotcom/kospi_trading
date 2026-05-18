@@ -91,7 +91,8 @@ def acquire_lock():
     """동일 봇 중복 실행 방지."""
     global _LOCK_HANDLE
     DATA_DIR.mkdir(exist_ok=True)
-    _LOCK_HANDLE = open(LOCK_FILE, "w")
+    current_pid = str(os.getpid())
+    _LOCK_HANDLE = open(LOCK_FILE, "a+")
     try:
         if _sys.platform == 'win32':
             _lock_mod.locking(_LOCK_HANDLE.fileno(), _lock_mod.LK_NBLCK, 1)
@@ -100,17 +101,27 @@ def acquire_lock():
     except OSError:
         logger.critical("🛑 이미 실행 중인 한국주식 봇이 있어 새 실행을 중단합니다.")
         raise SystemExit(1)
-    _LOCK_HANDLE.write(str(os.getpid()))
+    _LOCK_HANDLE.seek(0)
+    _LOCK_HANDLE.truncate()
+    _LOCK_HANDLE.write(current_pid)
     _LOCK_HANDLE.flush()
+    os.fsync(_LOCK_HANDLE.fileno())
 
     def _cleanup():
         try:
+            should_unlink = False
+            try:
+                _LOCK_HANDLE.seek(0)
+                should_unlink = _LOCK_HANDLE.read().strip() == current_pid
+            except Exception:
+                pass
             if _sys.platform == 'win32':
                 _lock_mod.locking(_LOCK_HANDLE.fileno(), _lock_mod.LK_UNLCK, 1)
             else:
                 _lock_mod.lockf(_LOCK_HANDLE, _lock_mod.LOCK_UN)
             _LOCK_HANDLE.close()
-            LOCK_FILE.unlink(missing_ok=True)
+            if should_unlink:
+                LOCK_FILE.unlink(missing_ok=True)
         except Exception:
             pass
 
@@ -1451,7 +1462,8 @@ class KospiTopTenSystem:
                                 f"{reentry_reason}"
                             )
                             continue
-                    signal = self.analyzer.detect_signal(sym, price_data)
+                    strong_market = bool(self._market_condition.get('strong_trend', False))
+                    signal = self.analyzer.detect_signal(sym, price_data, strong_market=strong_market)
                     if signal == 'BUY':
                         score = self.analyzer.calculate_score(sym, price_data)
                         # 시장 변동성 필터 — KOSPI 추세 하락 또는 변동성 과열 시 매수 억제
