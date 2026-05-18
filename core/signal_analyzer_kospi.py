@@ -142,17 +142,17 @@ class SignalAnalyzerKospi:
                 return 'HOLD'
 
             score = self.calculate_score(symbol, price_data)
-            volume_ok = avg_volume > 0 and volume >= avg_volume * 0.9
+            volume_ok = avg_volume > 0 and volume >= avg_volume * 0.8
             trend_ok = close > sma_20 and (sma_20 >= sma_60 or rsi >= 65)
-            momentum_ok = rsi >= 55 and price_data.get('macd', 0) > price_data.get('macd_signal', 0)
+            momentum_ok = rsi >= 52 and price_data.get('macd', 0) > price_data.get('macd_signal', 0)
 
-            # 눌림목 진입: RSI 과열(>76) 제외
-            not_overbought = rsi <= 76
+            # 눌림목 진입: RSI 과열(>78) 제외
+            not_overbought = rsi <= 78
             # BB 상단 돌파 구간 제외 (이미 상단 위에서 추격 방지)
             bb_upper = price_data.get('bb_upper', 0)
             not_bb_top = bb_upper <= 0 or close < bb_upper * 0.99
-            # SMA20 대비 8% 이상 이격 제외 (고점 추격 방지)
-            not_stretched = sma_20 <= 0 or close <= sma_20 * 1.08
+            # SMA20 대비 12% 이상 이격 제외 (강한 상승장 허용폭 확대)
+            not_stretched = sma_20 <= 0 or close <= sma_20 * 1.12
 
             # 수급 강도에 따른 임계값 조정 (Strategy 2)
             # 연속 매집 ≥3일 + 눌림목 진입 조건이면 점수 기준 완화
@@ -162,7 +162,7 @@ class SignalAnalyzerKospi:
                 'sma_20': sma_20,
                 'sma_5': price_data.get('sma_5', sma_20),
             })
-            buy_threshold = 60 if (cbd >= 3 and pullback_ok) else 70
+            buy_threshold = 58 if (cbd >= 3 and pullback_ok) else 65
 
             if score >= buy_threshold and trend_ok and momentum_ok and volume_ok \
                     and not_overbought and not_bb_top and not_stretched:

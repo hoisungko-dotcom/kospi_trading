@@ -85,7 +85,7 @@ class KISClientKospi:
                 'open':                s(df['open'].astype(float)),
                 'high':                s(high),
                 'low':                 s(low),
-                'volume':              s(volume),
+                'volume':              s(volume, -2, default=s(volume)),  # 전일 완성봉 기준 (장중 미완성봉 제외)
                 'consecutive_buy_days': consecutive_buy_days,
                 'sma_5':            s(sma_5,        default=s(close)),
                 'sma_20':           s(sma_20,       default=s(close)),
