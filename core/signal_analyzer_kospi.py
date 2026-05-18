@@ -110,12 +110,13 @@ class SignalAnalyzerKospi:
 
     # ── 신호 감지 ────────────────────────────────────────────────────────
 
-    def detect_signal(self, symbol: str, price_data: Dict) -> str:
+    def detect_signal(self, symbol: str, price_data: Dict, strong_market: bool = False) -> str:
         """
         매수/매도/보유 신호 반환.
 
         매도(SELL): 손절선 이탈 또는 RSI 과매도
         매수(BUY) : 종합 점수 + 추세 + 거래량 확인
+        strong_market=True 시 이격 한도 1.12 → 1.20 완화
         """
         try:
             rsi       = price_data.get('rsi', 50)
@@ -151,8 +152,9 @@ class SignalAnalyzerKospi:
             # BB 상단 돌파 구간 제외 (이미 상단 위에서 추격 방지)
             bb_upper = price_data.get('bb_upper', 0)
             not_bb_top = bb_upper <= 0 or close < bb_upper * 0.99
-            # SMA20 대비 12% 이상 이격 제외 (강한 상승장 허용폭 확대)
-            not_stretched = sma_20 <= 0 or close <= sma_20 * 1.12
+            # SMA20 대비 이격 한도 — 강한 상승장이면 20%까지 허용
+            stretch_limit = 1.20 if strong_market else 1.12
+            not_stretched = sma_20 <= 0 or close <= sma_20 * stretch_limit
 
             # 수급 강도에 따른 임계값 조정 (Strategy 2)
             # 연속 매집 ≥3일 + 눌림목 진입 조건이면 점수 기준 완화
