@@ -381,6 +381,13 @@ class KospiTopTenSystem:
         atr = float(price_data.get('atr', close * 0.02) or close * 0.02)
         atr_pct = (atr / close * 100) if close else 0.0
 
+        # SCALP 일봉 변동폭 기준을 시장 상황에 따라 동적 조정
+        # 강한 상승장(KOSPI SMA20 +X%)일수록 개별 종목 변동폭도 커지므로
+        # base + trend_gap * 0.5 로 완화 (예: +7.8% 상승장 → 8 + 3.9 = 11.9%)
+        base_range_pct = float(os.getenv("PROFILE_SCALP_RANGE_PCT", "8") or 8)
+        trend_gap = float(self._market_condition.get('trend_gap_pct', 0) or 0)
+        dynamic_range_pct = base_range_pct + max(0.0, trend_gap * 0.5)
+
         if (
             candle['bullish']
             and candle['upper_pct'] <= float(os.getenv("PROFILE_LONG_MAX_UPPER_WICK_PCT", "18") or 18)
@@ -393,11 +400,11 @@ class KospiTopTenSystem:
 
         if (
             candle['upper_pct'] >= float(os.getenv("PROFILE_SCALP_UPPER_WICK_PCT", "28") or 28)
-            or candle['range_pct'] >= float(os.getenv("PROFILE_SCALP_RANGE_PCT", "8") or 8)
+            or candle['range_pct'] >= dynamic_range_pct
             or atr_pct >= float(os.getenv("PROFILE_SCALP_ATR_PCT", "5") or 5)
             or rsi >= float(os.getenv("PROFILE_SCALP_RSI_PCT", "78") or 78)
         ):
-            return "SCALP", "윗꼬리/큰 변동성/과열 신호 — 짧게 수익 확보"
+            return "SCALP", f"윗꼬리/큰 변동성/과열 신호 — 짧게 수익 확보 (range기준 {dynamic_range_pct:.1f}%)"
 
         return "SWING", "추세는 있으나 과열·꼬리 부담 일부 — 중기 대응"
 
