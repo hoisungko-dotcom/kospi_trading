@@ -196,6 +196,10 @@ class KospiTopTenSystem:
         self._market_condition: dict = {           # 시장 변동성 필터 상태
             'trend_ok': True, 'volatility_ok': True, 'volatility_pct': 0.0,
         }
+        # 폭락 반등 예외 매수
+        self._crash_buy_count_today: int = 0
+        self._crash_buy_date: str = ""
+        self._crash_buy_cooldowns: dict[str, float] = {}   # 종목별 쿨다운
 
         # AI 매도 판단 클라이언트 (ANTHROPIC_API_KEY 없으면 비활성)
         api_key = os.getenv("ANTHROPIC_API_KEY", "")
@@ -866,6 +870,69 @@ class KospiTopTenSystem:
                 logger.debug(f"시장 감성 조회 실패: {_me}")
         except Exception as e:
             logger.warning(f"⚠️ 시장 상태 조회 실패 — 기존 상태 유지: {e}")
+
+    # ── 폭락 반등 예외 매수 ─────────────────────────────────────────────────
+
+    def _is_crash_environment(self) -> tuple[bool, str]:
+        """VIX·공포탐욕지수 기준으로 폭락 환경 여부 판단."""
+        if os.getenv("CRASH_RECOVERY_ENABLED", "true").lower() != "true":
+            return False, "비활성"
+        mc = self._market_condition
+        vix = mc.get('vix')
+        fg  = mc.get('fear_greed')
+        vix_thresh = float(os.getenv("CRASH_VIX_THRESHOLD", "40") or 40)
+        fg_thresh  = float(os.getenv("CRASH_FEAR_GREED_THRESHOLD", "15") or 15)
+        reasons = []
+        if vix and vix >= vix_thresh:
+            reasons.append(f"VIX {vix:.1f}>={vix_thresh:.0f}")
+        if fg is not None and fg <= fg_thresh:
+            reasons.append(f"FearGreed {fg:.0f}<={fg_thresh:.0f}")
+        if reasons:
+            return True, " + ".join(reasons)
+        return False, f"VIX={vix or '?'} FG={fg or '?'} — 폭락 환경 아님"
+
+    def _detect_stock_recovery_signal(self, sym: str, price_data: dict) -> tuple[bool, str]:
+        """종목 단위 반등 신호 감지: 극단 oversold + 아래꼬리 hammer + 거래량 급증."""
+        rsi = price_data.get('rsi', 50)
+        rsi_thresh = float(os.getenv("CRASH_RSI_THRESHOLD", "25") or 25)
+        if rsi > rsi_thresh:
+            return False, f"RSI {rsi:.0f}>{rsi_thresh:.0f}"
+        volume     = price_data.get('volume', 0)
+        avg_volume = price_data.get('avg_volume_20', volume) or volume
+        vol_spike  = float(os.getenv("CRASH_VOLUME_SPIKE", "2.0") or 2.0)
+        if avg_volume > 0 and volume < avg_volume * vol_spike:
+            return False, f"거래량 미달 ({volume/avg_volume:.1f}x < {vol_spike:.1f}x)"
+        # 1분봉 hammer 확인. 자동매수에서는 데이터 확인 실패를 진입 근거로 쓰지 않는다.
+        require_intraday = (
+            os.getenv("CRASH_REQUIRE_INTRADAY_CONFIRM", "true").lower() == "true"
+        )
+        try:
+            minute_df = self.kis_client.get_intraday_ohlcv(sym, interval='1m', lookback=5)
+            if minute_df is not None and len(minute_df) >= 2:
+                last = minute_df.iloc[-1]
+                o, h, l, c = float(last['open']), float(last['high']), float(last['low']), float(last['close'])
+                total_range = h - l
+                if total_range > 0:
+                    lower_wick = min(o, c) - l
+                    body       = abs(c - o)
+                    # hammer: 아래꼬리가 전체 봉 높이의 50% 이상, 양봉, 실체가 있음(doji 제외)
+                    if lower_wick >= total_range * 0.5 and c > o and body > 0:
+                        return True, f"RSI {rsi:.0f} + 거래량 {volume/avg_volume:.1f}x + hammer"
+                    return False, f"캔들 패턴 미충족 (아래꼬리 {lower_wick/total_range*100:.0f}%)"
+        except Exception:
+            if require_intraday:
+                return False, "1분봉 반전 확인 실패"
+        if require_intraday:
+            return False, "1분봉 반전 데이터 부족"
+        # 명시적으로 완화한 경우에만 RSI + 거래량으로 판단
+        return True, f"RSI {rsi:.0f} + 거래량 {volume/avg_volume:.1f}x"
+
+    def _crash_daily_reset(self):
+        """날짜 바뀌면 당일 폭락 매수 카운트 초기화."""
+        today = datetime.now(self.KST).strftime("%Y%m%d")
+        if self._crash_buy_date != today:
+            self._crash_buy_date = today
+            self._crash_buy_count_today = 0
 
     def _allow_market_filter_override(self, symbol: str, price_data: dict, score: float) -> tuple[bool, str]:
         """강한 매수 신호에 한해 변동성 필터 예외 허용 여부를 판단한다."""
@@ -1540,6 +1607,59 @@ class KospiTopTenSystem:
                         logger.warning(f"⚡ [{sym}/{market_tag}] 🟢 매수 신호! ₩{cur_price:,.0f} | 점수 {score:.1f}")
                         buy_queue.append((sym, cur_price, price_data))
 
+            # ── 1.5단계: 폭락 반등 예외 매수 스캔 ──────────────────────────
+            self._crash_daily_reset()
+            crash_max_daily = int(os.getenv("CRASH_MAX_DAILY_BUYS", "1") or 1)
+            crash_queued = 0
+            crash_remaining = max(0, crash_max_daily - self._crash_buy_count_today)
+            crash_buy_until = int(os.getenv("CRASH_BUY_UNTIL_HHMM", "1450") or 1450)
+            if crash_remaining <= 0:
+                logger.debug(f"폭락반등 당일 한도 소진 ({self._crash_buy_count_today}/{crash_max_daily}건)")
+            elif crash_remaining > 0 and buy_start_hm <= now_hm < crash_buy_until:
+                is_crash, crash_env_reason = self._is_crash_environment()
+                if is_crash:
+                    crash_score_thresh = float(os.getenv("CRASH_SCORE_THRESHOLD", "70") or 70)
+                    logger.warning(f"🚨 폭락 환경 감지: {crash_env_reason} — 반등 스캔 시작")
+                    already_queued = {s for s, _, _ in buy_queue}
+                    for r in results:
+                        if crash_queued >= crash_remaining:
+                            break
+                        sym = r['symbol']
+                        if sym in already_queued:
+                            continue
+                        if self.position_mgr.get_holding_quantity(sym) > 0:
+                            continue
+                        if self._crash_buy_cooldowns.get(sym, 0) > time.time():
+                            continue
+                        strategy_holdings = self.position_mgr.count_strategy_positions()
+                        if strategy_holdings >= self.MAX_HOLDINGS:
+                            break
+                        price_data_c = kis_data.get(sym) or r['data']
+                        if not price_data_c:
+                            continue
+                        if sym in live_prices:
+                            price_data_c = {**price_data_c, 'close': live_prices[sym]}
+                        recovery_ok, rec_reason = self._detect_stock_recovery_signal(sym, price_data_c)
+                        if not recovery_ok:
+                            continue
+                        crash_score = self.analyzer.calculate_score(
+                            sym, price_data_c, self.sector_monitor.get_sector_bonus(sym)
+                        )
+                        if crash_score < crash_score_thresh:
+                            logger.debug(f"  [{sym}] 폭락반등 점수 미달 ({crash_score:.1f}<{crash_score_thresh})")
+                            continue
+                        crash_price_data = {**price_data_c, '_crash_mode': True}
+                        market_tag = 'KS' if sym in self.kospi_symbols_set else 'KQ'
+                        logger.warning(
+                            f"🚨 [{sym}/{market_tag}] 폭락 반등 진입 신호! "
+                            f"₩{price_data_c['close']:,.0f} | 점수 {crash_score:.1f} | {rec_reason}"
+                        )
+                        buy_queue.append((sym, price_data_c['close'], crash_price_data))
+                        already_queued.add(sym)
+                        crash_queued += 1
+            elif now_hm >= crash_buy_until:
+                logger.debug(f"폭락반등 매수 컷오프 이후 — 진입 보류 ({now_hm}>={crash_buy_until})")
+
             # ── 2단계: 매도 먼저 순서대로 실행 ─────────────────────────────
             if sell_queue:
                 logger.info(f"  📋 매도 대기열: {len(sell_queue)}건 순서대로 실행")
@@ -1623,9 +1743,10 @@ class KospiTopTenSystem:
                 return
 
             price_data = price_data or {}
+            crash_mode = bool(price_data.get('_crash_mode', False))
 
-            # SCALP 프로필 종목은 과열/고점 매수 위험으로 진입 제외
-            if os.getenv("SCALP_BUY_ENABLED", "false").lower() != "true":
+            # SCALP 프로필 종목은 과열/고점 매수 위험으로 진입 제외 (폭락반등 예외)
+            if not crash_mode and os.getenv("SCALP_BUY_ENABLED", "false").lower() != "true":
                 pre_score = self.analyzer.calculate_score(symbol, price_data)
                 pre_profile, pre_reason = self._classify_trade_profile(symbol, price_data, pre_score)
                 if pre_profile == "SCALP":
@@ -1644,6 +1765,12 @@ class KospiTopTenSystem:
             effective_position_pct = (
                 full_position_pct if signal_score >= full_position_score else max_position_pct
             )
+
+            # 폭락 반등 예외 매수 — 포지션을 CRASH_POSITION_PCT로 제한
+            if crash_mode:
+                crash_pos_pct = float(os.getenv("CRASH_POSITION_PCT", "0.10") or 0.10)
+                effective_position_pct = min(effective_position_pct, crash_pos_pct)
+                logger.warning(f"  🚨 [{symbol}] 폭락반등 진입 — 포지션 상한 {crash_pos_pct*100:.0f}% 적용")
 
             # 14:30 이후 늦은 진입 — 포지션 상한을 LATE_BUY_MAX_POSITION_PCT 로 제한
             now_hm = int(datetime.now(self.KST).strftime('%H%M'))
@@ -1686,7 +1813,8 @@ class KospiTopTenSystem:
                 account_value = float(portfolio.get('cash', 0)) + holdings_value
 
             risk_qty = self.risk_mgr.calculate_position_size(account_value, risk_pct, price, stop_loss)
-            value_cap = self.POSITION_AMOUNT
+            pct_cap_value = account_value * effective_position_pct if account_value > 0 else self.POSITION_AMOUNT
+            value_cap = min(self.POSITION_AMOUNT, pct_cap_value)
             cap_qty = int((value_cap * (1 - cash_buffer_pct)) / expected_order_price)
             quantity = min(risk_qty, cap_qty)
 
@@ -1814,6 +1942,23 @@ class KospiTopTenSystem:
                             for item in target_plan
                         )
                     )
+                crash_extra = []
+                if crash_mode:
+                    self._crash_daily_reset()
+                    self._crash_buy_count_today += 1
+                    crash_cooldown_sec = float(os.getenv("CRASH_STOCK_COOLDOWN_SEC", "14400") or 14400)
+                    self._crash_buy_cooldowns[symbol] = time.time() + crash_cooldown_sec
+                    crash_extra = [
+                        f"🚨 폭락반등 예외매수 ({self._crash_buy_count_today}/"
+                        f"{os.getenv('CRASH_MAX_DAILY_BUYS', '2')})"
+                    ]
+                    self.reporter.send_message(
+                        f"🚨 폭락반등 예외매수\n"
+                        f"종목: {symbol}\n"
+                        f"수량: {quantity}주 @ ₩{expected_order_price:,.0f}\n"
+                        f"점수: {signal_score:.1f} | 프로필: {profile}\n"
+                        f"당일 폭락매수: {self._crash_buy_count_today}건"
+                    )
                 self._notify_trade(
                     "BUY",
                     symbol,
@@ -1826,7 +1971,7 @@ class KospiTopTenSystem:
                             f"{item['stage']}차 ₩{item['target_price']:,.0f}"
                             for item in target_plan
                         ) if target_plan else "목표가: 없음",
-                    ],
+                    ] + crash_extra,
                 )
             else:
                 logger.error(f"❌ [{symbol}] 매수 주문 실패 — 포지션 미등록")
