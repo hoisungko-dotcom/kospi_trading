@@ -1439,9 +1439,26 @@ class KospiTopTenSystem:
                     if now_hm < buy_start_hm:
                         logger.debug(f"  [{sym}] 장 시작 안정화 대기 (09:30까지 진입 금지)")
                         continue
+
+                    # 14:30 이후 예외 진입 처리
+                    late_buy_enabled = os.getenv("LATE_BUY_ENABLED", "false").lower() == "true"
+                    late_buy_until   = int(os.getenv("LATE_BUY_UNTIL_HHMM", "1500") or 1500)
+                    late_buy_score   = float(os.getenv("LATE_BUY_MIN_SCORE", "90") or 90)
+                    late_buy_pos_pct = float(os.getenv("LATE_BUY_MAX_POSITION_PCT", "0.5") or 0.5)
+                    is_late_window   = late_buy_enabled and buy_cutoff_hm <= now_hm < late_buy_until
+
                     if now_hm >= buy_cutoff_hm:
-                        logger.debug(f"  [{sym}] 신규 매수 컷오프 이후 — 진입 보류")
-                        continue
+                        if not is_late_window:
+                            logger.debug(f"  [{sym}] 신규 매수 컷오프 이후 — 진입 보류")
+                            continue
+                        # 늦은 진입 — 점수 사전 체크 (고비용 신호 계산 전에 필터)
+                        pre_score = self.analyzer.calculate_score(sym, price_data,
+                            self.sector_monitor.get_sector_bonus(sym))
+                        if pre_score < late_buy_score:
+                            logger.debug(
+                                f"  [{sym}] 늦은 진입 점수 미달 ({pre_score:.1f} < {late_buy_score:.0f}) — 스킵"
+                            )
+                            continue
                     # 보유 상한 도달 시 매수 신호 자체를 무시
                     strategy_holdings = self.position_mgr.count_strategy_positions()
                     if strategy_holdings >= self.MAX_HOLDINGS:
@@ -1627,6 +1644,14 @@ class KospiTopTenSystem:
             effective_position_pct = (
                 full_position_pct if signal_score >= full_position_score else max_position_pct
             )
+
+            # 14:30 이후 늦은 진입 — 포지션 상한을 LATE_BUY_MAX_POSITION_PCT 로 제한
+            now_hm = int(datetime.now(self.KST).strftime('%H%M'))
+            buy_cutoff_hm = int(os.getenv("NEW_BUY_CUTOFF_HHMM", "1430") or 1430)
+            if now_hm >= buy_cutoff_hm and os.getenv("LATE_BUY_ENABLED", "false").lower() == "true":
+                late_pos_pct = float(os.getenv("LATE_BUY_MAX_POSITION_PCT", "0.5") or 0.5)
+                effective_position_pct = min(effective_position_pct, late_pos_pct)
+                logger.info(f"  🌙 [{symbol}] 늦은 진입 — 포지션 상한 {late_pos_pct*100:.0f}% 적용")
             allow_strong_chase = (
                 os.getenv("ALLOW_STRONG_BUY_CHASE", "true").lower() == "true"
             )
