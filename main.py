@@ -92,6 +92,29 @@ def acquire_lock():
     global _LOCK_HANDLE
     DATA_DIR.mkdir(exist_ok=True)
     current_pid = str(os.getpid())
+
+    # 기존 락 파일에 살아있는 PID가 있으면 사전 차단 (더 명확한 오류 메시지)
+    if LOCK_FILE.exists():
+        try:
+            existing_pid_str = LOCK_FILE.read_text().strip()
+            if existing_pid_str and existing_pid_str != current_pid:
+                existing_pid = int(existing_pid_str)
+                try:
+                    os.kill(existing_pid, 0)   # 프로세스 존재 여부만 확인 (신호 미전달)
+                    logger.critical(
+                        f"🛑 이미 실행 중인 봇 감지 (PID: {existing_pid}) — "
+                        f"이중 실행 차단. 기존 봇을 먼저 종료하세요."
+                    )
+                    raise SystemExit(1)
+                except ProcessLookupError:
+                    # PID가 죽어있으면 stale 락 파일 → 삭제 후 진행
+                    logger.info(f"🧹 잔존 락 파일 정리 (PID {existing_pid} 이미 종료됨)")
+                    LOCK_FILE.unlink(missing_ok=True)
+        except SystemExit:
+            raise
+        except Exception:
+            pass   # PID 파싱 실패 등 → fcntl에게 최종 판단 위임
+
     _LOCK_HANDLE = open(LOCK_FILE, "a+")
     try:
         if _sys.platform == 'win32':
@@ -99,7 +122,14 @@ def acquire_lock():
         else:
             _lock_mod.lockf(_LOCK_HANDLE, _lock_mod.LOCK_EX | _lock_mod.LOCK_NB)
     except OSError:
-        logger.critical("🛑 이미 실행 중인 한국주식 봇이 있어 새 실행을 중단합니다.")
+        try:
+            pid_in_file = LOCK_FILE.read_text().strip()
+        except Exception:
+            pid_in_file = "?"
+        logger.critical(
+            f"🛑 이미 실행 중인 한국주식 봇이 있어 새 실행을 중단합니다. "
+            f"(실행 중 PID: {pid_in_file})"
+        )
         raise SystemExit(1)
     _LOCK_HANDLE.seek(0)
     _LOCK_HANDLE.truncate()
@@ -2151,7 +2181,7 @@ class KospiTopTenSystem:
 
 def main():
     acquire_lock()
-    logger.info("🧩 코드버전: kospi-v3.2 / profile-classifier / profit-harvest-reentry")
+    logger.info("🧩 코드버전: kospi-v3.6 / crash-recovery / dynamic-scalp / late-buy / sector-kis")
     system = KospiTopTenSystem()
     system.show_balance()
     system.schedule_tasks()
