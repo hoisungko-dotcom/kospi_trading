@@ -53,6 +53,7 @@ from core.position_manager import PositionManager
 from core.dynamic_exit_analyzer_kospi import DynamicExitAnalyzerKospi
 from core.risk_management import RiskManagement
 from core.reporting import TelegramReporter
+from core.sector_monitor import SectorMonitor
 
 load_dotenv(override=True)
 
@@ -157,15 +158,16 @@ class KospiTopTenSystem:
         logger.info(f"   투자 환경: {'모의투자' if mock_trading else '실전투자'}")
         logger.info("=" * 70)
 
-        self.kis_client   = KISClientKospi()
-        self.async_client = AsyncDataClientKospi(self.kis_client)
-        self.db           = DatabaseManagerKospi()
-        self.analyzer     = SignalAnalyzerKospi()
-        self.exit_analyzer = DynamicExitAnalyzerKospi()
-        self.position_mgr = PositionManager()
-        self.risk_mgr     = RiskManagement()
-        self.reporter     = TelegramReporter()
-        self._order_lock  = threading.Lock()   # 주문 직렬화 락
+        self.kis_client     = KISClientKospi()
+        self.async_client   = AsyncDataClientKospi(self.kis_client)
+        self.db             = DatabaseManagerKospi()
+        self.analyzer       = SignalAnalyzerKospi()
+        self.sector_monitor = SectorMonitor(self.kis_client._client)
+        self.exit_analyzer  = DynamicExitAnalyzerKospi()
+        self.position_mgr   = PositionManager()
+        self.risk_mgr       = RiskManagement()
+        self.reporter       = TelegramReporter()
+        self._order_lock    = threading.Lock()   # 주문 직렬화 락
 
         self._sync_portfolio_from_kis()
 
@@ -966,6 +968,9 @@ class KospiTopTenSystem:
         t0          = time.time()
         all_results = self.async_client.fetch_all_stocks(all_syms, kospi_set=self.kospi_symbols_set)
 
+        # 섹터 모멘텀 갱신 (10분 캐시)
+        self.sector_monitor.update(force=True)
+
         # 점수 계산 + DB 저장
         logger.info("📈 점수 계산 중...")
         kospi_scores:  dict[str, float] = {}
@@ -978,7 +983,8 @@ class KospiTopTenSystem:
             sym    = r['symbol']
             market = 'KOSPI' if sym in self.kospi_symbols_set else 'KOSDAQ'
             self.db.insert_price_data(sym, r['name'], market, r['data'])
-            score = self.analyzer.calculate_score(sym, r['data'])
+            sector_bonus = self.sector_monitor.get_sector_bonus(sym)
+            score = self.analyzer.calculate_score(sym, r['data'], sector_bonus=sector_bonus)
             price_map[sym] = r['data']['close']
             if sym in self.kospi_symbols_set:
                 kospi_scores[sym] = score
@@ -1014,11 +1020,17 @@ class KospiTopTenSystem:
 
         logger.info(f"  ▶ 코스피 매수후보 ({len(top_kospi)}개)")
         for i, sym in enumerate(top_kospi, 1):
-            logger.info(f"    {i}. {sym:6s} | 점수: {kospi_scores[sym]:5.1f} | ₩{price_map.get(sym,0):,.0f}")
+            sector = self.sector_monitor.get_sector_name(sym)
+            bonus  = self.sector_monitor.get_sector_bonus(sym)
+            bonus_str = f" [{sector} {bonus:+.2f}]" if sector else ""
+            logger.info(f"    {i}. {sym:6s} | 점수: {kospi_scores[sym]:5.1f} | ₩{price_map.get(sym,0):,.0f}{bonus_str}")
 
         logger.info(f"  ▶ 코스닥 매수후보 ({len(top_kosdaq)}개)")
         for i, sym in enumerate(top_kosdaq, 1):
-            logger.info(f"    {i}. {sym:6s} | 점수: {kosdaq_scores[sym]:5.1f} | ₩{price_map.get(sym,0):,.0f}")
+            sector = self.sector_monitor.get_sector_name(sym)
+            bonus  = self.sector_monitor.get_sector_bonus(sym)
+            bonus_str = f" [{sector} {bonus:+.2f}]" if sector else ""
+            logger.info(f"    {i}. {sym:6s} | 점수: {kosdaq_scores[sym]:5.1f} | ₩{price_map.get(sym,0):,.0f}{bonus_str}")
 
         if existing:
             logger.info(f"\n  📌 보유 종목 → 매도 타이밍 모니터링: {sorted(existing)}")
@@ -1052,13 +1064,17 @@ class KospiTopTenSystem:
         t0          = time.time()
         all_results = self.async_client.fetch_all_stocks(all_syms, kospi_set=self.kospi_symbols_set)
 
+        # 섹터 모멘텀 갱신 (10분 캐시 — 변경 없으면 스킵)
+        self.sector_monitor.update()
+
         kospi_scores:  dict[str, float] = {}
         kosdaq_scores: dict[str, float] = {}
         for r in all_results:
             if not r['data']:
                 continue
             sym   = r['symbol']
-            score = self.analyzer.calculate_score(sym, r['data'])
+            sector_bonus = self.sector_monitor.get_sector_bonus(sym)
+            score = self.analyzer.calculate_score(sym, r['data'], sector_bonus=sector_bonus)
             self.db.insert_price_data(sym, sym, 'KOSPI' if sym in self.kospi_symbols_set else 'KOSDAQ', r['data'])
             if sym in self.kospi_symbols_set:
                 kospi_scores[sym] = score

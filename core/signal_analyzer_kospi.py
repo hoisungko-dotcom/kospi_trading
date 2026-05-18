@@ -15,7 +15,7 @@ class SignalAnalyzerKospi:
 
     # ── 점수 계산 ─────────────────────────────────────────────────────────
 
-    def calculate_score(self, symbol: str, price_data: Dict) -> float:
+    def calculate_score(self, symbol: str, price_data: Dict, sector_bonus: float = 0.0) -> float:
         """
         종목 점수 계산 (0~100).
 
@@ -28,6 +28,7 @@ class SignalAnalyzerKospi:
         - 5일 등락    15점
         - RSI         최대 10점  (보조 — 백테스트상 고가중 역효과)
         - 저PBR 밸류업 최대 10점  (선택)
+        - 섹터 모멘텀  ±15%  (업종 분봉 기반 가중치)
         """
         try:
             score = 0.0
@@ -96,6 +97,10 @@ class SignalAnalyzerKospi:
             if sma_448 > 0:
                 if close > sma_448 and close_prev <= sma_448 and vol_surge:
                     score += 30   # 448일선 돌파 + 거래량 급증
+
+            # 섹터 모멘텀 가중치 (±15%) — 강한 섹터 종목 부스트, 약한 섹터 억제
+            if sector_bonus != 0.0:
+                score = score * (1.0 + sector_bonus)
 
             return min(score, 100.0)
 
