@@ -260,3 +260,36 @@ class SectorMonitor:
 
     def get_sector_name(self, symbol: str) -> str:
         return ALL_SECTORS.get(self._stock_sector.get(symbol, ""), "")
+
+    def get_top_sector_symbols(
+        self,
+        all_scores: dict,
+        top_n: int = 3,
+        per_sector: int = 50,
+    ) -> list:
+        """아침 스캔 점수 기반 상위 N개 섹터의 상위 종목 풀 반환."""
+        if not self._sector_momentum:
+            return list(all_scores.keys())
+
+        top_sectors = sorted(
+            self._sector_momentum, key=lambda c: self._sector_momentum[c], reverse=True
+        )[:top_n]
+
+        sector_stocks: dict = {}
+        for sym, score in all_scores.items():
+            code = self._stock_sector.get(sym)
+            if code in top_sectors:
+                sector_stocks.setdefault(code, []).append((sym, score))
+
+        pool = []
+        sector_names = []
+        for code in top_sectors:
+            stocks = sorted(sector_stocks.get(code, []), key=lambda x: x[1], reverse=True)
+            pool.extend(sym for sym, _ in stocks[:per_sector])
+            if stocks:
+                sector_names.append(f"{ALL_SECTORS.get(code, code)}({len(stocks[:per_sector])}개)")
+
+        if sector_names:
+            logger.info(f"🏭 섹터풀 구성: {', '.join(sector_names)} → 총 {len(pool)}종목")
+
+        return list(dict.fromkeys(pool))
