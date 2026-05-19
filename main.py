@@ -181,7 +181,7 @@ class KospiTopTenSystem:
     KOSDAQ_COUNT     = 4           # 매수후보 코스닥 종목 수
     MAX_HOLDINGS     = int(os.getenv("MAX_STRATEGY_POSITIONS", "10"))  # 봇 신규 진입(strategy) 최대 종목 수
     KOSDAQ_TOP_N     = 300         # 코스닥 시총 상위 N개만 스캔
-    RESCREEN_INTERVAL_SEC = 3600   # 장중 재선정 주기 (1시간)
+    RESCREEN_INTERVAL_SEC = int(os.getenv("RESCREEN_INTERVAL_SEC", "600"))  # 장중 재선정 주기 (기본 10분)
     BUY_FAIL_COOLDOWN_SEC = 3600   # 매수 실패 종목 재시도 대기 (1시간)
 
     def __init__(self):
@@ -230,6 +230,8 @@ class KospiTopTenSystem:
         self._crash_buy_count_today: int = 0
         self._crash_buy_date: str = ""
         self._crash_buy_cooldowns: dict[str, float] = {}   # 종목별 쿨다운
+        self._ai_market_cache: tuple | None = None         # (threshold, timestamp) — 30분 캐시
+        self.rescan_pool: list[str] = []                    # 아침 스캔 점수 상위 종목풀 (재선정 전용)
 
         # AI 매도 판단 클라이언트 (ANTHROPIC_API_KEY 없으면 비활성)
         api_key = os.getenv("ANTHROPIC_API_KEY", "")
@@ -523,9 +525,9 @@ class KospiTopTenSystem:
         atr_pct = ((atr / buy_price) * 100) if atr > 0 else 2.0
         if profile == "SCALP":
             levels = [
-                (max(2.5, atr_pct * 1.2), 0.30),
-                (max(4.0, atr_pct * 2.0), 0.45),
-                (max(6.0, atr_pct * 3.0), 1.00),
+                (max(2.0, atr_pct * 0.9), 0.35),
+                (max(3.5, atr_pct * 1.5), 0.50),
+                (max(5.0, atr_pct * 2.5), 1.00),
             ]
         elif profile == "POSITION":
             levels = [
@@ -671,7 +673,11 @@ class KospiTopTenSystem:
         five_min_state: dict,
         price_data: dict,
     ) -> tuple[bool, str | None]:
-        """장 막판에는 약한 종목만 정리한다."""
+        """장 막판에는 약한 종목만 정리한다. SCALP 재분류 종목은 15:00에 당일 강제 청산."""
+        scalp_eod_hm = int(os.getenv("SCALP_EOD_CLOSE_HHMM", "1500") or 1500)
+        if profile == "SCALP" and now_hm >= scalp_eod_hm:
+            return True, f"SCALP 당일청산 ({now_hm // 100:02d}:{now_hm % 100:02d} >= {scalp_eod_hm // 100:02d}:{scalp_eod_hm % 100:02d})"
+
         start_hm = int(os.getenv("EOD_WEAK_SELL_START_HHMM", "1520") or 1520)
         if now_hm < start_hm:
             return False, None
@@ -896,10 +902,81 @@ class KospiTopTenSystem:
                 news = summary.get('news', [])
                 if news:
                     logger.info("📰 주요뉴스: " + " / ".join(news[:3]))
+
+                # AI 시장 조건 판단 — strong_trend 임계값 동적 조정
+                ai_gap = self._ai_market_gap_threshold(
+                    vix=summary.get('vix'),
+                    fear_greed=summary.get('fear_greed'),
+                    trend_gap_pct=trend_gap_pct,
+                    vol_pct=vol_pct,
+                    base_threshold=base_threshold,
+                )
+                if ai_gap is not None:
+                    new_strong = trend_ok and trend_gap_pct >= ai_gap
+                    new_selective = new_strong and base_threshold < vol_pct <= strong_trend_limit
+                    changed = ai_gap != strong_trend_gap_required
+                    logger.info(
+                        f"🤖 AI 시장 판단: 진입 임계값 {ai_gap:.1f}%"
+                        f"{' (기존 ' + str(strong_trend_gap_required) + '% → 변경)' if changed else ' (유지)'}"
+                        f" | strong_trend={new_strong}"
+                    )
+                    self._market_condition['strong_trend_gap_required'] = ai_gap
+                    self._market_condition['strong_trend'] = new_strong
+                    self._market_condition['selective_ok'] = new_selective
             except Exception as _me:
                 logger.debug(f"시장 감성 조회 실패: {_me}")
         except Exception as e:
             logger.warning(f"⚠️ 시장 상태 조회 실패 — 기존 상태 유지: {e}")
+
+    # ── AI 시장 조건 판단 ──────────────────────────────────────────────────
+
+    def _ai_market_gap_threshold(
+        self,
+        vix: float | None,
+        fear_greed: dict | None,
+        trend_gap_pct: float,
+        vol_pct: float,
+        base_threshold: float,
+    ) -> float | None:
+        """Claude Haiku로 strong_trend 진입 임계값 동적 판단 (30분 캐시).
+        반환: 2.0~7.0% 범위의 임계값, 실패 시 None."""
+        if self._ai_client is None:
+            return None
+        import time as _time
+        now = _time.time()
+        if self._ai_market_cache is not None:
+            val, ts = self._ai_market_cache
+            if now - ts < 1800:  # 30분
+                return val
+        try:
+            fg_val = fear_greed.get('value') if isinstance(fear_greed, dict) else fear_greed
+            prompt = (
+                "한국 주식 자동매매 시스템입니다. 현재 시장 데이터를 보고 "
+                "'KOSPI가 SMA20보다 몇 % 이상 높아야 변동성 높은 장에서도 매수를 허용할지' "
+                "임계값을 결정해주세요.\n\n"
+                f"현재 데이터:\n"
+                f"- VIX: {vix or '?'}\n"
+                f"- Fear & Greed: {fg_val or '?'} (0=극도공포, 100=극도탐욕)\n"
+                f"- KOSPI vs SMA20: +{trend_gap_pct:.1f}%\n"
+                f"- KOSPI ATR 변동성: {vol_pct:.1f}% (기본 허용: {base_threshold:.1f}%)\n\n"
+                "기준:\n"
+                "- VIX 낮고 탐욕 높음 → 낮은 임계값(3~4%) 허용\n"
+                "- VIX 높고 공포 강함 → 높은 임계값(5~6%) 필요\n"
+                "- 중립 → 4~5%\n\n"
+                "숫자 하나만 응답 (예: 4.0)"
+            )
+            resp = self._ai_client.messages.create(
+                model="claude-haiku-4-5-20251001",
+                max_tokens=10,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            val = float(resp.content[0].text.strip())
+            val = max(2.0, min(7.0, val))
+            self._ai_market_cache = (val, now)
+            return val
+        except Exception as e:
+            logger.debug(f"AI 시장 임계값 조회 실패: {e}")
+            return None
 
     # ── 폭락 반등 예외 매수 ─────────────────────────────────────────────────
 
@@ -909,7 +986,8 @@ class KospiTopTenSystem:
             return False, "비활성"
         mc = self._market_condition
         vix = mc.get('vix')
-        fg  = mc.get('fear_greed')
+        fg_raw = mc.get('fear_greed')
+        fg = float(fg_raw['value']) if isinstance(fg_raw, dict) else fg_raw
         vix_thresh = float(os.getenv("CRASH_VIX_THRESHOLD", "40") or 40)
         fg_thresh  = float(os.getenv("CRASH_FEAR_GREED_THRESHOLD", "15") or 15)
         reasons = []
@@ -1136,8 +1214,15 @@ class KospiTopTenSystem:
         self.top_10_symbols = top_kospi + top_kosdaq
         self._save_top10(self.top_10_symbols)
 
+        # 재선정 풀 구성: 점수 상위 N종목 (섹터 무관)
+        pool_size = int(os.getenv("RESCAN_POOL_SIZE", "150"))
+        all_scores = {**kospi_scores, **kosdaq_scores}
+        self.rescan_pool = [
+            sym for sym, _ in sorted(all_scores.items(), key=lambda x: x[1], reverse=True)[:pool_size]
+        ]
+
         elapsed = time.time() - t0
-        logger.info(f"\n✅ 스크리닝 완료! ({elapsed:.1f}초)\n")
+        logger.info(f"\n✅ 스크리닝 완료! ({elapsed:.1f}초) | 재선정 풀 {len(self.rescan_pool)}종목 (점수 상위)\n")
 
         logger.info(f"  ▶ 코스피 매수후보 ({len(top_kospi)}개)")
         for i, sym in enumerate(top_kospi, 1):
@@ -1167,20 +1252,25 @@ class KospiTopTenSystem:
 
     def hourly_rescreen(self):
         """
-        장중 1시간마다 매수후보 재선정.
+        장중 재선정 (기본 10분 주기).
+        - 아침 스캔에서 선정된 상위 섹터풀 종목만 재스캔 (섹터풀 없으면 전체 폴백)
         - 보유 종목은 항상 감시 유지
-        - 기존 후보와 50% 이상 겹치면 전체 교체, 미만이면 점진 교체 (상위 8개 유지 + 신규 2개)
-        - 아침 스크리닝과 동일한 데이터 소스 사용
+        - 기존 후보와 50% 이상 겹치면 전체 교체, 미만이면 점진 교체
         """
         now_str = datetime.now(self.KST).strftime('%H:%M:%S')
         logger.info("=" * 70)
-        logger.info(f"🔄 장중 재선정 시작 — {now_str}")
-        logger.info("=" * 70)
 
-        kospi_syms  = self.get_kospi_symbols()
-        kosdaq_syms = [s for s in self.get_kosdaq_symbols(self.KOSDAQ_TOP_N)
-                       if s not in set(kospi_syms)]
-        all_syms    = kospi_syms + kosdaq_syms
+        if self.rescan_pool:
+            all_syms = self.rescan_pool
+            logger.info(f"🔄 재선정 시작 — {now_str} (점수풀 {len(all_syms)}종목)")
+        else:
+            kospi_syms  = self.get_kospi_symbols()
+            kosdaq_syms = [s for s in self.get_kosdaq_symbols(self.KOSDAQ_TOP_N)
+                           if s not in set(kospi_syms)]
+            all_syms    = kospi_syms + kosdaq_syms
+            logger.info(f"🔄 전체 재선정 시작 (풀 없음) — {now_str} ({len(all_syms)}종목)")
+
+        logger.info("=" * 70)
 
         t0          = time.time()
         all_results = self.async_client.fetch_all_stocks(all_syms, kospi_set=self.kospi_symbols_set)
@@ -1775,15 +1865,37 @@ class KospiTopTenSystem:
             price_data = price_data or {}
             crash_mode = bool(price_data.get('_crash_mode', False))
 
-            # SCALP 프로필 종목은 과열/고점 매수 위험으로 진입 제외 (폭락반등 예외)
-            if not crash_mode and os.getenv("SCALP_BUY_ENABLED", "false").lower() != "true":
+            # SCALP → SWING 재분류: 자동매매에 스캘프 부적합, SWING으로 재분류 후 포지션 50% 축소
+            _is_scalp_reclassified = False
+            if not crash_mode:
                 pre_score = self.analyzer.calculate_score(symbol, price_data)
                 pre_profile, pre_reason = self._classify_trade_profile(symbol, price_data, pre_score)
                 if pre_profile == "SCALP":
+                    # 거래량 필터: SCALP 당일매매는 충분한 유동성 필요
+                    scalp_min_vol_ratio = float(os.getenv("SCALP_MIN_VOLUME_RATIO", "1.0") or 1.0)
+                    scalp_min_turnover = float(os.getenv("SCALP_MIN_TURNOVER", "5000000000") or 5000000000)
+                    _vol = float(price_data.get('volume', 0) or 0)
+                    _avg_vol = float(price_data.get('avg_volume_20', _vol) or _vol)
+                    _turnover = _vol * price
+                    _vol_ratio_ok = (_avg_vol <= 0) or (_vol >= _avg_vol * scalp_min_vol_ratio)
+                    _turnover_ok = _turnover >= scalp_min_turnover
+                    if not _vol_ratio_ok:
+                        logger.info(
+                            f"⛔ [{symbol}] SCALP 당일매매 거래량 미달 "
+                            f"({_vol/max(_avg_vol,1):.2f}x < {scalp_min_vol_ratio:.1f}x 20일평균) — 진입 취소"
+                        )
+                        return
+                    if not _turnover_ok:
+                        logger.info(
+                            f"⛔ [{symbol}] SCALP 당일매매 거래대금 미달 "
+                            f"({_turnover/1e8:.0f}억 < {scalp_min_turnover/1e8:.0f}억) — 진입 취소"
+                        )
+                        return
+                    _is_scalp_reclassified = True
                     logger.info(
-                        f"⛔ [{symbol}] 매수 스킵 — SCALP 프로필 진입 제외 ({pre_reason})"
+                        f"↪️ [{symbol}] SCALP → 당일매매 재분류 (거래량 {_vol/max(_avg_vol,1):.2f}x, "
+                        f"거래대금 {_turnover/1e8:.0f}억 | {pre_reason})"
                     )
-                    return
 
             atr = float(price_data.get('atr') or price * 0.02)
             stop_loss = max(price - atr * 2.0, price * 0.97)
@@ -1795,6 +1907,10 @@ class KospiTopTenSystem:
             effective_position_pct = (
                 full_position_pct if signal_score >= full_position_score else max_position_pct
             )
+            # SCALP→SWING 재분류 시 포지션 50% 축소 (변동성 리스크 완화)
+            if _is_scalp_reclassified:
+                effective_position_pct *= 0.5
+                logger.info(f"  📉 [{symbol}] SCALP→SWING 포지션 축소: {effective_position_pct*100:.0f}%")
 
             # 폭락 반등 예외 매수 — 포지션을 CRASH_POSITION_PCT로 제한
             if crash_mode:
@@ -1949,6 +2065,8 @@ class KospiTopTenSystem:
                     return
                 self.position_mgr.add_position(symbol, quantity, expected_order_price, source='strategy')
                 profile, profile_reason = self._classify_trade_profile(symbol, price_data, signal_score)
+                if _is_scalp_reclassified and profile == "SCALP":
+                    profile_reason = f"[당일청산] {profile_reason}"
                 target_plan = self._build_target_plan(expected_order_price, atr, profile)
                 self.position_mgr.update_position_metadata(
                     symbol,
@@ -2095,6 +2213,13 @@ class KospiTopTenSystem:
         schedule.every(30).seconds.do(self._holdings_gate)  # 보유 종목 손절/트레일링 빠른 체크
         schedule.every(5).minutes.do(self._intraday_gate)   # 매수 스캔 + 전체 모니터링
         schedule.every().day.at("15:30").do(self.stop_monitoring)
+
+        # 장중 재시작 시 섹터풀 즉시 구성 (아침 스캔 없이 시작된 경우)
+        now = datetime.now(self.KST)
+        hm  = now.hour * 100 + now.minute
+        if now.weekday() < 5 and 900 <= hm < 1530 and not self.rescan_pool:
+            logger.info("🔄 장중 재시작 감지 — 섹터풀 즉시 구성을 위해 아침 스크리닝 실행")
+            threading.Thread(target=self.morning_screening, daemon=True).start()
 
     def _intraday_gate(self):
         now = datetime.now(self.KST)
