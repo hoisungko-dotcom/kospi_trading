@@ -280,16 +280,18 @@ class KISClientKospi:
         quantity: int,
         price: float,
         allow_price_chase: bool = False,
+        market_order: bool = False,
     ) -> bool:
-        """시장가 매수 주문"""
+        """매수 주문 (market_order=True 시 시장가)"""
         return self._executor.execute_order(
             symbol,
             quantity,
             price,
             side='BUY',
             allow_price_chase=allow_price_chase,
+            market_order=market_order,
         )
 
-    def place_sell_order(self, symbol: str, quantity: int, price: float) -> bool:
-        """시장가 매도 주문"""
-        return self._executor.execute_order(symbol, quantity, price, side='SELL')
+    def place_sell_order(self, symbol: str, quantity: int, price: float, market_order: bool = False) -> bool:
+        """매도 주문 (market_order=True 시 시장가)"""
+        return self._executor.execute_order(symbol, quantity, price, side='SELL', market_order=market_order)

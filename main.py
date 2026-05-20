@@ -782,11 +782,12 @@ class KospiTopTenSystem:
             order_price = (int(price) // tick) * tick
             stop_price  = (int(order_price * (1 - vb_stop_pct)) // tick) * tick
 
+            _vb_market = os.getenv("VB_ORDER_TYPE", "market").lower() == "market"
             logger.warning(
                 f"💥 [VB] {symbol} 변동성돌파 진입! ₩{order_price:,.0f} × {quantity}주 "
-                f"(예산 ₩{per_pos_amount:,.0f} | 손절 ₩{stop_price:,.0f})"
+                f"(예산 ₩{per_pos_amount:,.0f} | 손절 ₩{stop_price:,.0f} | {'시장가' if _vb_market else '지정가'})"
             )
-            success = self.kis_client.place_buy_order(symbol, quantity, order_price)
+            success = self.kis_client.place_buy_order(symbol, quantity, order_price, market_order=_vb_market)
             if not success:
                 logger.warning(f"⚠️ [VB] {symbol} 주문 실패")
                 return False
@@ -2027,12 +2028,19 @@ class KospiTopTenSystem:
                             self.vb_entered_today.add(_vb_sym)
 
             # ── 2단계: 매도 먼저 순서대로 실행 ─────────────────────────────
+            _eod_market  = os.getenv("EOD_ORDER_TYPE",  "market").lower() == "market"
+            _sl_market   = os.getenv("SL_ORDER_TYPE",   "market").lower() == "market"
             if sell_queue:
                 logger.info(f"  📋 매도 대기열: {len(sell_queue)}건 순서대로 실행")
             for idx, (sym, qty, price, reason, meta) in enumerate(sell_queue, 1):
                 logger.warning(f"🛑 [{sym}] ({idx}/{len(sell_queue)}) {reason} 매도")
+                _reason_str = str(reason)
+                _use_market = (
+                    (_eod_market and ("EOD" in _reason_str or "VB당일청산" in _reason_str))
+                    or (_sl_market and ("손절" in _reason_str or "SL" in _reason_str or "VB손절" in _reason_str))
+                )
                 with self._order_lock:
-                    sell_success = self.execute_sell(sym, qty, price, reason=reason)
+                    sell_success = self.execute_sell(sym, qty, price, reason=reason, market_order=_use_market)
                 if sell_success:
                     self._record_profit_harvest_exit(sym, price, str(reason))
                     if meta and meta.get('target_stage'):
@@ -2380,10 +2388,11 @@ class KospiTopTenSystem:
         except Exception as e:
             logger.error(f"❌ 매수 실패 ({symbol}): {e}")
 
-    def execute_sell(self, symbol: str, quantity: int, price: float, reason: str = "") -> bool:
+    def execute_sell(self, symbol: str, quantity: int, price: float, reason: str = "", market_order: bool = False) -> bool:
         try:
+            order_type_label = "시장가" if market_order else "지정가"
             logger.warning(
-                f"\n💰 [{symbol}] 매도 주문!\n"
+                f"\n💰 [{symbol}] 매도 주문! ({order_type_label})\n"
                 f"   시간: {datetime.now(self.KST).strftime('%H:%M:%S')}\n"
                 f"   가격: ₩{price:,.0f}  수량: {quantity}주\n"
                 f"   금액: ₩{price * quantity:,.0f}"
@@ -2392,7 +2401,7 @@ class KospiTopTenSystem:
             # 매도 전에 매수가 확보 (remove_position 이후 holdings에서 사라질 수 있음)
             holding_snap = self.position_mgr.portfolio.get('holdings', {}).get(symbol, {})
             buy_price_snap = float(holding_snap.get('price', 0) or 0)
-            success = self.kis_client.place_sell_order(symbol, quantity, price)
+            success = self.kis_client.place_sell_order(symbol, quantity, price, market_order=market_order)
             if success:
                 verify_enabled = os.getenv("ORDER_FILL_VERIFY_ENABLED", "true").lower() == "true"
                 if verify_enabled and not self.kis_client.verify_domestic_fill(

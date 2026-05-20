@@ -81,7 +81,7 @@ bot_status() {
 }
 
 safety_status() {
-    local mock live maxpos vb_cap vb_max vb_k vb_stop vb_eod vb_sma vb_sc
+    local mock live maxpos vb_cap vb_max vb_k vb_stop vb_eod vb_sma vb_sc eod_order sl_order vb_order
     mock=$(grep -E '^MOCK_TRADING=' "$ENV_FILE" 2>/dev/null | tail -1 | cut -d= -f2 | tr -d '[:space:]')
     live=$(grep -E '^LIVE_TRADING_CONFIRMED=' "$ENV_FILE" 2>/dev/null | tail -1 | cut -d= -f2 | tr -d '[:space:]')
     maxpos=$(grep -E '^MAX_POSITION_PCT=' "$ENV_FILE" 2>/dev/null | tail -1 | cut -d= -f2 | tr -d '[:space:]')
@@ -92,6 +92,9 @@ safety_status() {
     vb_eod=$(grep -E '^VB_EOD_CLOSE_HHMM=' "$ENV_FILE" 2>/dev/null | tail -1 | cut -d'#' -f1 | cut -d= -f2 | tr -d '[:space:]')
     vb_sma=$(grep -E '^VB_SMA_MAX_GAP_PCT=' "$ENV_FILE" 2>/dev/null | tail -1 | cut -d'#' -f1 | cut -d= -f2 | tr -d '[:space:]')
     vb_sc=$(grep -E '^VB_MIN_SCORE=' "$ENV_FILE" 2>/dev/null | tail -1 | cut -d'#' -f1 | cut -d= -f2 | tr -d '[:space:]')
+    eod_order=$(grep -E '^EOD_ORDER_TYPE=' "$ENV_FILE" 2>/dev/null | tail -1 | cut -d'#' -f1 | cut -d= -f2 | tr -d '[:space:]')
+    sl_order=$(grep -E '^SL_ORDER_TYPE=' "$ENV_FILE" 2>/dev/null | tail -1 | cut -d'#' -f1 | cut -d= -f2 | tr -d '[:space:]')
+    vb_order=$(grep -E '^VB_ORDER_TYPE=' "$ENV_FILE" 2>/dev/null | tail -1 | cut -d'#' -f1 | cut -d= -f2 | tr -d '[:space:]')
 
     [ -z "$mock" ] && mock="true"
     [ -z "$live" ] && live="false"
@@ -103,6 +106,9 @@ safety_status() {
     [ -z "$vb_eod" ] && vb_eod="1450"
     [ -z "$vb_sma" ] && vb_sma="12.0"
     [ -z "$vb_sc" ] && vb_sc="60.0"
+    [ -z "$eod_order" ] && eod_order="limit"
+    [ -z "$sl_order" ] && sl_order="limit"
+    [ -z "$vb_order" ] && vb_order="limit"
 
     local mode_label
     if [ "$mock" = "true" ]; then
@@ -113,6 +119,7 @@ safety_status() {
     echo "  $mode_label | MAX_POSITION_PCT=$maxpos | LIVE_CONFIRMED=$live"
     echo "  💥 VB전략: 자금${vb_cap}(최대${vb_max}포지션) | k=${vb_k} | 손절-${vb_stop}% | 강제청산${vb_eod:0:2}:${vb_eod:2:2}"
     echo "     VB풀: SMA20+${vb_sma}% 이내 + 점수${vb_sc}+ 종목 (SMA20 근접 안정형)"
+    echo "  📋 주문방식: EOD=${eod_order} | 손절=${sl_order} | VB진입=${vb_order}"
 }
 
 token_status() {

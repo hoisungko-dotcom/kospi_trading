@@ -55,7 +55,7 @@ class OrderExecution:
             return bool(self._refresh_order_token())
         return True
 
-    def execute_order(self, symbol, qty, price, side='BUY', allow_price_chase: bool | None = None):
+    def execute_order(self, symbol, qty, price, side='BUY', allow_price_chase: bool | None = None, market_order: bool = False):
         """주문 실행 — 토큰 만료 / 초당 거래건수 초과 시 최대 5회 재시도"""
         SEP = '=' * 80
 
@@ -126,13 +126,25 @@ class OrderExecution:
 
         exchange_id = os.getenv("KIS_EXCHANGE_ID", "KRX").strip() or "KRX"
 
+        if market_order:
+            ord_dvsn   = "01"
+            ord_unpr   = "0"
+            order_label = "시장가"
+        else:
+            ord_dvsn   = "00"
+            ord_unpr   = str(ord_price)
+            if side == 'BUY':
+                order_label = '강한신호 소폭 추격 지정가' if allow_buy_chase else '현재가 이하 지정가'
+            else:
+                order_label = '체결 우선 지정가'
+
         data = {
             "CANO"           : _cano,
             "ACNT_PRDT_CD"   : _acnt,
             "PDNO"           : symbol,
-            "ORD_DVSN"       : "00",
+            "ORD_DVSN"       : ord_dvsn,
             "ORD_QTY"        : str(int(qty)),
-            "ORD_UNPR"       : str(ord_price),
+            "ORD_UNPR"       : ord_unpr,
             "CNDT_PRIC"      : "",
             "SLL_TYPE"       : "",
             "EXCG_ID_DVSN_CD": exchange_id,
@@ -140,10 +152,6 @@ class OrderExecution:
 
         logger.critical(f"  URL          : {url}")
         logger.critical(f"  TR_ID        : {tr_id}")
-        if side == 'BUY':
-            order_label = '강한신호 소폭 추격 지정가' if allow_buy_chase else '현재가 이하 지정가'
-        else:
-            order_label = '체결 우선 지정가'
         logger.critical(f"  Order Price  : ₩{ord_price:,.0f} ({order_label})")
         logger.critical(f"  Data         : {json.dumps(data, ensure_ascii=False)}")
 
