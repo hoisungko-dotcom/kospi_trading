@@ -229,6 +229,15 @@ class KISClient:
                 try:
                     response = self.session.get(url, headers=headers, params=params)
                     if response.status_code != 200:
+                        try:
+                            _err = response.json()
+                        except Exception:
+                            _err = {}
+                        if _err.get("msg_cd") == "EGW00201" and auth_attempt == 0:
+                            logger.warning("⚠️ 잔고조회 EGW00201 초당 초과 — 1.5초 후 재시도")
+                            time.sleep(1.5)
+                            expired_token = True
+                            break
                         logger.error(f"❌ 국내 잔고 조회 실패 HTTP {response.status_code}: {response.text[:200]}")
                         return None
                     data = response.json()
@@ -240,6 +249,11 @@ class KISClient:
                                 self.trade_base_url, self.trade_appkey, self.trade_appsecret
                             )
                             headers["authorization"] = f"Bearer {self.trade_token}"
+                            expired_token = True
+                            break
+                        if data.get('msg_cd') == 'EGW00201' and auth_attempt == 0:
+                            logger.warning("⚠️ 잔고조회 EGW00201 초당 초과 — 1.5초 후 재시도")
+                            time.sleep(1.5)
                             expired_token = True
                             break
                         logger.error(f"❌ 국내 잔고 조회 실패 HTTP {response.status_code}: {response.text[:200]}")
@@ -424,8 +438,21 @@ class KISClient:
                             self.trade_base_url, self.trade_appkey, self.trade_appsecret
                         )
                         continue
+                    if result.get("msg_cd") == "EGW00201" and auth_attempt == 0:
+                        logger.warning("⚠️ 주문가능금액 EGW00201 초당 초과 — 1.5초 후 재시도")
+                        time.sleep(1.5)
+                        continue
                     logger.warning(f"⚠️ 주문가능금액 조회 실패: {result.get('msg1')}")
                     return -1.0
+                if response.status_code != 200:
+                    try:
+                        _err = response.json()
+                    except Exception:
+                        _err = {}
+                    if _err.get("msg_cd") == "EGW00201" and auth_attempt == 0:
+                        logger.warning("⚠️ 주문가능금액 EGW00201(HTTP500) — 1.5초 후 재시도")
+                        time.sleep(1.5)
+                        continue
                 logger.error(f"❌ 주문가능금액 조회 HTTP {response.status_code}: {response.text[:200]}")
                 return -1.0
             except Exception as e:

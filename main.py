@@ -233,6 +233,11 @@ class KospiTopTenSystem:
         self._ai_market_cache: tuple | None = None         # (threshold, timestamp) — 30분 캐시
         self.rescan_pool: list[str] = []                    # 아침 스캔 점수 상위 종목풀 (재선정 전용)
 
+        # 변동성 돌파(VB) 전략
+        self.vb_candidates: dict[str, float] = {}          # {symbol: entry_price}
+        self.vb_entered_today: set[str]      = set()       # 당일 이미 진입한 VB 종목
+        self.vb_candidate_date: str          = ""          # vb_candidates 유효 날짜
+
         # AI 매도 판단 클라이언트 (ANTHROPIC_API_KEY 없으면 비활성)
         api_key = os.getenv("ANTHROPIC_API_KEY", "")
         if _ANTHROPIC_AVAILABLE and api_key:
@@ -662,6 +667,151 @@ class KospiTopTenSystem:
             }
 
         return None, None
+
+    # ── 변동성 돌파(VB) 전략 ──────────────────────────────────────────────
+
+    def _vb_ai_prefilter(
+        self,
+        candidates: list[str],
+        scores: dict[str, float],
+        data_map: dict[str, dict],
+    ) -> dict[str, float]:
+        """아침 스크리닝 후보에 대해 Haiku로 변동성 돌파 진입 적합 여부 사전 판단.
+        반환: {symbol: entry_price} — AI 승인 종목만 포함."""
+        import json as _json, re as _re
+
+        k = float(os.getenv("VB_K_FACTOR", "0.5"))
+        result: dict[str, float] = {}
+
+        for sym in candidates:
+            pd         = data_map.get(sym, {})
+            prev_high  = float(pd.get('high', 0) or 0)
+            prev_low   = float(pd.get('low', 0) or 0)
+            prev_close = float(pd.get('close', 0) or 0)
+            prev_range = prev_high - prev_low
+            if prev_range <= 0 or prev_close <= 0:
+                continue
+            entry_price = round(prev_close + prev_range * k)
+
+            if not self._ai_client:
+                result[sym] = entry_price
+                continue
+
+            score   = scores.get(sym, 0)
+            sector  = self.sector_monitor.get_sector_name(sym) or '미분류'
+            atr     = float(pd.get('atr', 0) or 0)
+            sma20   = float(pd.get('sma_20', prev_close) or prev_close)
+            sma20_gap = (prev_close / sma20 - 1) * 100 if sma20 else 0
+
+            prompt = (
+                f"종목: {sym} | 섹터: {sector} | 스크리닝점수: {score:.0f}/100\n"
+                f"전일종가: ₩{prev_close:,.0f} | 전일범위: ₩{prev_range:,.0f} ({prev_range/prev_close*100:.1f}%)\n"
+                f"ATR: ₩{atr:,.0f} | SMA20 대비: {sma20_gap:+.1f}%\n"
+                f"변동성돌파 예상진입가: ₩{entry_price:,.0f} (전일종가 + 전일범위×{k})\n\n"
+                f"오늘 변동성 돌파 전략 진입 적합 여부를 판단하세요.\n"
+                f"전제: 당일 청산, 손절 -2%, 목표 +2~3%\n"
+                f"JSON만 답변: {{\"decision\":\"BUY\"또는\"SKIP\",\"reason\":\"한줄이유\"}}"
+            )
+            try:
+                resp = self._ai_client.messages.create(
+                    model="claude-haiku-4-5-20251001",
+                    max_tokens=80,
+                    messages=[{"role": "user", "content": prompt}],
+                )
+                text = resp.content[0].text.strip()
+                m = _re.search(r'\{.*\}', text, _re.DOTALL)
+                if m:
+                    data = _json.loads(m.group())
+                    decision = data.get("decision", "SKIP")
+                    reason   = data.get("reason", "")
+                    if decision == "BUY":
+                        result[sym] = entry_price
+                        logger.info(f"  ✅ [VB] {sym} AI승인 — {reason} (진입가 ₩{entry_price:,.0f})")
+                    else:
+                        logger.info(f"  ❌ [VB] {sym} AI거절 — {reason}")
+            except Exception as e:
+                logger.warning(f"  [VB] {sym} AI판단 실패: {e} — 기본 승인")
+                result[sym] = entry_price
+
+        logger.info(f"🤖 [VB] 사전 필터 완료: {len(result)}/{len(candidates)}종목 승인")
+        return result
+
+    def _execute_vb_buy(self, symbol: str, price: float) -> bool:
+        """변동성 돌파 전략 전용 매수. VB_CAPITAL_PCT × 1/VB_MAX_POSITIONS 자금 사용."""
+        try:
+            vb_capital_pct   = float(os.getenv("VB_CAPITAL_PCT", "0.30"))
+            vb_max_positions = int(os.getenv("VB_MAX_POSITIONS", "3"))
+            vb_stop_pct      = float(os.getenv("VB_STOP_LOSS_PCT", "2.0")) / 100
+
+            holdings = self.position_mgr.portfolio.get('holdings', {})
+            vb_count = sum(1 for h in holdings.values() if h.get('source') == 'vb')
+            if vb_count >= vb_max_positions:
+                logger.info(f"⛔ [{symbol}] VB 포지션 상한 ({vb_count}/{vb_max_positions}) — 진입 취소")
+                return False
+
+            portfolio     = self.position_mgr.portfolio
+            account_value = float(portfolio.get('total_value') or 0)
+            if account_value <= 0:
+                holdings_value = sum(
+                    h.get('quantity', 0) * h.get('price', 0)
+                    for h in portfolio.get('holdings', {}).values()
+                )
+                account_value = float(portfolio.get('cash', 0)) + holdings_value
+
+            per_pos_amount = account_value * vb_capital_pct / vb_max_positions
+            try:
+                orderable = self.kis_client.get_orderable_cash(symbol, price, use_max=True)
+            except Exception:
+                orderable = float(portfolio.get('cash', 0))
+
+            budget   = min(per_pos_amount, orderable * 0.99)
+            quantity = max(1, int(budget / price))
+            if quantity <= 0 or price <= 0:
+                return False
+
+            def _krx_tick(p: float) -> int:
+                if p < 2_000:    return 1
+                if p < 5_000:    return 5
+                if p < 10_000:   return 10
+                if p < 50_000:   return 50
+                if p < 100_000:  return 100
+                if p < 500_000:  return 500
+                return 1_000
+
+            tick        = _krx_tick(price)
+            order_price = (int(price) // tick) * tick
+            stop_price  = (int(order_price * (1 - vb_stop_pct)) // tick) * tick
+
+            logger.warning(
+                f"💥 [VB] {symbol} 변동성돌파 진입! ₩{order_price:,.0f} × {quantity}주 "
+                f"(예산 ₩{per_pos_amount:,.0f} | 손절 ₩{stop_price:,.0f})"
+            )
+            success = self.kis_client.place_buy_order(symbol, quantity, order_price)
+            if not success:
+                logger.warning(f"⚠️ [VB] {symbol} 주문 실패")
+                return False
+
+            self.position_mgr.add_position(symbol, quantity, order_price, source='vb')
+            self.position_mgr.update_position_metadata(
+                symbol,
+                strategy_profile='SCALP',
+                strategy_profile_reason='변동성돌파전략(VB)',
+                strategy_profile_time=datetime.now(self.KST).isoformat(),
+                effective_profile='SCALP',
+                vb_stop_price=stop_price,
+            )
+            logger.info(f"  ✅ [VB] {symbol} 진입 완료 — 손절 ₩{stop_price:,.0f}")
+            try:
+                self.reporter.send_message(
+                    f"💥 [VB돌파] {symbol} 진입\n"
+                    f"₩{order_price:,.0f} × {quantity}주 | 손절 ₩{stop_price:,.0f}"
+                )
+            except Exception:
+                pass
+            return True
+        except Exception as e:
+            logger.error(f"❌ [VB] {symbol} 매수 오류: {e}", exc_info=True)
+            return False
 
     def _should_eod_cleanup(
         self,
@@ -1175,6 +1325,7 @@ class KospiTopTenSystem:
         kospi_scores:  dict[str, float] = {}
         kosdaq_scores: dict[str, float] = {}
         price_map:     dict[str, float] = {}
+        vb_data_map:   dict[str, dict]  = {}
 
         for r in all_results:
             if not r['data']:
@@ -1185,6 +1336,7 @@ class KospiTopTenSystem:
             sector_bonus = self.sector_monitor.get_sector_bonus(sym)
             score = self.analyzer.calculate_score(sym, r['data'], sector_bonus=sector_bonus)
             price_map[sym] = r['data']['close']
+            vb_data_map[sym] = r['data']
             if sym in self.kospi_symbols_set:
                 kospi_scores[sym] = score
             else:
@@ -1213,6 +1365,33 @@ class KospiTopTenSystem:
 
         self.top_10_symbols = top_kospi + top_kosdaq
         self._save_top10(self.top_10_symbols)
+
+        # 변동성 돌파 전략 AI 사전 필터
+        today_str = datetime.now(self.KST).strftime('%Y-%m-%d')
+        all_scores_full = {**kospi_scores, **kosdaq_scores}
+        # VB 후보: 전체 스캔 종목 중 SMA20 근접(+12% 이내) + 점수 60 이상인 상위 20종목
+        _vb_sma_max = float(os.getenv("VB_SMA_MAX_GAP_PCT", "12.0"))
+        _vb_min_sc  = float(os.getenv("VB_MIN_SCORE", "60.0"))
+        _vb_stable: list[tuple[str, float]] = []
+        for _sym, _d in vb_data_map.items():
+            if _sym in existing:
+                continue
+            _close = float(_d.get('close', 0) or 0)
+            _sma20 = float(_d.get('sma_20', _close) or _close)
+            if _close <= 0 or _sma20 <= 0:
+                continue
+            _gap = (_close / _sma20 - 1) * 100
+            _sc  = all_scores_full.get(_sym, 0)
+            if _gap <= _vb_sma_max and _sc >= _vb_min_sc:
+                _vb_stable.append((_sym, _sc))
+        _vb_stable.sort(key=lambda x: x[1], reverse=True)
+        vb_input = [s for s, _ in _vb_stable[:20]] or self.top_10_symbols
+        logger.info(f"  [VB] 풀 구성: SMA20+{_vb_sma_max:.0f}% 이내+점수{_vb_min_sc:.0f}+ → {len(vb_input)}종목")
+        self.vb_candidates    = self._vb_ai_prefilter(vb_input, all_scores_full, vb_data_map)
+        self.vb_candidate_date = today_str
+        self.vb_entered_today  = set()
+        if self.vb_candidates:
+            logger.info(f"  🎯 [VB] AI 승인 {len(self.vb_candidates)}종목: {list(self.vb_candidates.keys())}")
 
         # 재선정 풀 구성: 점수 상위 N종목 (섹터 무관)
         pool_size = int(os.getenv("RESCAN_POOL_SIZE", "150"))
@@ -1244,6 +1423,29 @@ class KospiTopTenSystem:
         logger.info("=" * 80)
         logger.info("🔍 09:00 ~ 15:30 모니터링 대기")
         logger.info("=" * 80)
+
+        # 아침 스크리닝 완료 텔레그램 알림
+        try:
+            mc = self._market_condition
+            market_str = "✅ 매수 가능" if mc.get('selective_ok') or mc.get('strong_trend') else "⛔ 매수 차단"
+            kospi_lines = "\n".join(
+                f"  {i}. {sym} | {kospi_scores[sym]:.0f}점 | ₩{price_map.get(sym,0):,.0f}"
+                for i, sym in enumerate(top_kospi, 1)
+            )
+            kosdaq_lines = "\n".join(
+                f"  {i}. {sym} | {kosdaq_scores[sym]:.0f}점 | ₩{price_map.get(sym,0):,.0f}"
+                for i, sym in enumerate(top_kosdaq, 1)
+            )
+            msg = (
+                f"🌅 아침 스크리닝 완료 ({elapsed:.0f}초)\n"
+                f"재선정 풀: {len(self.rescan_pool)}종목 | {market_str}\n"
+                f"KOSPI {mc.get('kospi',0):,.0f} (SMA20 대비 {mc.get('trend_gap_pct',0):+.1f}%) | 변동성 {mc.get('volatility_pct',0):.2f}%\n"
+                f"\n▶ 코스피 매수후보\n{kospi_lines}\n"
+                f"\n▶ 코스닥 매수후보\n{kosdaq_lines}"
+            )
+            self.reporter.send_message(msg)
+        except Exception as e:
+            logger.debug(f"아침 스크리닝 텔레그램 발송 실패: {e}")
 
         self.is_market_open = True
         self.last_rescreen_time = time.time()
@@ -1429,6 +1631,19 @@ class KospiTopTenSystem:
                     self.position_mgr.update_highest_price(sym, cur_price)
                     high_p = max(high_p, cur_price)
                     max_profit = ((high_p - buy_price) / buy_price * 100) if buy_price else 0
+
+                    # ── VB 포지션 전용 조기 청산 (14:50 강제 + 손절) ────────
+                    if holding.get('source') == 'vb':
+                        vb_eod_hm   = int(os.getenv("VB_EOD_CLOSE_HHMM", "1450") or 1450)
+                        vb_stop_price = float(holding.get('vb_stop_price', 0) or 0)
+                        if now_hm >= vb_eod_hm:
+                            sell_queue.append((sym, holding_qty, cur_price,
+                                f"VB당일청산({now_hm//100:02d}:{now_hm%100:02d})", None))
+                            continue
+                        if vb_stop_price > 0 and cur_price <= vb_stop_price:
+                            sell_queue.append((sym, holding_qty, cur_price,
+                                f"VB손절(₩{vb_stop_price:,.0f})", None))
+                            continue
 
                     market_tag = 'KS' if sym in self.kospi_symbols_set else 'KQ'
                     logger.info(
@@ -1780,6 +1995,37 @@ class KospiTopTenSystem:
             elif now_hm >= crash_buy_until:
                 logger.debug(f"폭락반등 매수 컷오프 이후 — 진입 보류 ({now_hm}>={crash_buy_until})")
 
+            # ── 1.6단계: 변동성 돌파(VB) 진입 체크 ──────────────────────────
+            today_str_vb  = datetime.now(self.KST).strftime('%Y-%m-%d')
+            if self.vb_candidate_date != today_str_vb:
+                self.vb_entered_today  = set()
+                self.vb_candidate_date = today_str_vb
+
+            vb_cutoff_hm = int(os.getenv("VB_BUY_CUTOFF_HHMM", "1430") or 1430)
+            if self.vb_candidates and buy_start_hm <= now_hm < vb_cutoff_hm:
+                for _vb_sym, _vb_entry in list(self.vb_candidates.items()):
+                    if _vb_sym in self.vb_entered_today:
+                        continue
+                    if self.position_mgr.get_holding_quantity(_vb_sym) > 0:
+                        continue
+                    _vb_price = live_prices.get(_vb_sym, 0)
+                    if _vb_price <= 0:
+                        for _r in results:
+                            if _r['symbol'] == _vb_sym and _r.get('data'):
+                                _vb_price = float(_r['data'].get('close', 0) or 0)
+                                break
+                    if _vb_price <= 0:
+                        continue
+                    if _vb_price >= _vb_entry:
+                        logger.warning(
+                            f"🔥 [VB] {_vb_sym} 돌파! 현재가 ₩{_vb_price:,.0f} >= "
+                            f"진입가 ₩{_vb_entry:,.0f}"
+                        )
+                        with self._order_lock:
+                            _ok = self._execute_vb_buy(_vb_sym, _vb_price)
+                        if _ok:
+                            self.vb_entered_today.add(_vb_sym)
+
             # ── 2단계: 매도 먼저 순서대로 실행 ─────────────────────────────
             if sell_queue:
                 logger.info(f"  📋 매도 대기열: {len(sell_queue)}건 순서대로 실행")
@@ -1839,6 +2085,7 @@ class KospiTopTenSystem:
 
         except Exception as e:
             logger.error(f"❌ 모니터링 오류: {e}", exc_info=True)
+            self._error_alert("실시간 모니터링(realtime_monitoring)", e)
 
     # ── 주문 실행 ──────────────────────────────────────────────────────────
 
@@ -2190,6 +2437,49 @@ class KospiTopTenSystem:
 
     # ── 스케줄 설정 ────────────────────────────────────────────────────────
 
+    def _error_alert(self, context: str, exc: Exception) -> None:
+        """에러 발생 시 텔레그램으로 에러 내용 + Claude Code 질의 문구 전송."""
+        import traceback as _tb
+        err_type  = type(exc).__name__
+        err_msg   = str(exc)[:200]
+        tb_lines  = _tb.format_exc().splitlines()
+        # traceback에서 실제 파일/라인만 추출
+        file_hints = [l.strip() for l in tb_lines if 'File "' in l and 'main.py' in l]
+        location  = file_hints[-1] if file_hints else ""
+
+        # 에러 유형별 힌트
+        if "not supported between" in err_msg or isinstance(exc, TypeError):
+            hint = "타입 비교 오류 — dict/float 혼용 가능성"
+        elif isinstance(exc, KeyError):
+            hint = "딕셔너리 키 없음 — 데이터 구조 확인 필요"
+        elif isinstance(exc, (ConnectionError, TimeoutError)) or "timeout" in err_msg.lower():
+            hint = "API 연결/타임아웃 — KIS 서버 상태 또는 토큰 확인"
+        elif "token" in err_msg.lower() or "auth" in err_msg.lower():
+            hint = "인증 오류 — KIS 토큰 만료 가능성"
+        elif isinstance(exc, AttributeError):
+            hint = "속성 없음 — None 반환값 또는 코드 변경 확인"
+        else:
+            hint = "예상치 못한 오류"
+
+        msg = (
+            f"❌ 에러 발생: {context}\n"
+            f"{'─'*30}\n"
+            f"유형: {err_type}\n"
+            f"내용: {err_msg}\n"
+            f"{location}\n"
+            f"{'─'*30}\n"
+            f"💡 {hint}\n\n"
+            f"📋 Claude Code 질의:\n"
+            f"kospi_trading_system {context} 오류:\n"
+            f"{err_type}: {err_msg}\n"
+            f"{location}\n"
+            f"수정해줘"
+        )
+        try:
+            self.reporter.send_message(msg)
+        except Exception:
+            pass
+
     def _refresh_tokens_scheduled(self):
         """08:00 선제 토큰 갱신 — 스크리닝 30분 전에 새 토큰을 발급해 만료를 방지한다."""
         try:
@@ -2231,9 +2521,10 @@ class KospiTopTenSystem:
 
         buy_cutoff_hm = int(os.getenv("NEW_BUY_CUTOFF_HHMM", "1430") or 1430)
 
-        # 매수 컷오프 이후(14:30~)는 재선정 불필요 — 보유 종목 감시만
+        # 매수 컷오프 이후(14:30~)는 보유 종목 있을 때만 감시
         if hm >= buy_cutoff_hm:
-            self.realtime_monitoring()
+            if self.position_mgr.portfolio.get('holdings'):
+                self.realtime_monitoring()
             return
 
         # 1시간마다 재선정 (모니터링보다 우선)
@@ -2241,8 +2532,8 @@ class KospiTopTenSystem:
             try:
                 self.hourly_rescreen()
             except Exception as e:
-                logger.error(f"❌ 장중 재선정 실패: {e}")
-                # 실패해도 last_rescreen_time 갱신 — 다음 틱에서 모니터링이 작동하도록
+                logger.error(f"❌ 장중 재선정 실패: {e}", exc_info=True)
+                self._error_alert("장중 재선정(hourly_rescreen)", e)
                 self.last_rescreen_time = time.time()
 
         self.realtime_monitoring()
@@ -2300,6 +2591,7 @@ class KospiTopTenSystem:
             self._fast_holdings_exit_check()
         except Exception as e:
             logger.error(f"❌ [1분체크] 오류: {e}", exc_info=True)
+            self._error_alert("보유종목 손절/트레일링 체크", e)
 
 
 # ── 엔트리포인트 ─────────────────────────────────────────────────────────
@@ -2343,6 +2635,7 @@ def main():
             time.sleep(1)
         except Exception as e:
             logger.error(f"❌ 메인 루프 오류: {e}", exc_info=True)
+            system._error_alert("메인 루프(schedule)", e)
             time.sleep(10)
 
 

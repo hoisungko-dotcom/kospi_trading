@@ -81,14 +81,28 @@ bot_status() {
 }
 
 safety_status() {
-    local mock live maxpos
+    local mock live maxpos vb_cap vb_max vb_k vb_stop vb_eod vb_sma vb_sc
     mock=$(grep -E '^MOCK_TRADING=' "$ENV_FILE" 2>/dev/null | tail -1 | cut -d= -f2 | tr -d '[:space:]')
     live=$(grep -E '^LIVE_TRADING_CONFIRMED=' "$ENV_FILE" 2>/dev/null | tail -1 | cut -d= -f2 | tr -d '[:space:]')
     maxpos=$(grep -E '^MAX_POSITION_PCT=' "$ENV_FILE" 2>/dev/null | tail -1 | cut -d= -f2 | tr -d '[:space:]')
+    vb_cap=$(grep -E '^VB_CAPITAL_PCT=' "$ENV_FILE" 2>/dev/null | tail -1 | cut -d'#' -f1 | cut -d= -f2 | tr -d '[:space:]')
+    vb_max=$(grep -E '^VB_MAX_POSITIONS=' "$ENV_FILE" 2>/dev/null | tail -1 | cut -d'#' -f1 | cut -d= -f2 | tr -d '[:space:]')
+    vb_k=$(grep -E '^VB_K_FACTOR=' "$ENV_FILE" 2>/dev/null | tail -1 | cut -d'#' -f1 | cut -d= -f2 | tr -d '[:space:]')
+    vb_stop=$(grep -E '^VB_STOP_LOSS_PCT=' "$ENV_FILE" 2>/dev/null | tail -1 | cut -d'#' -f1 | cut -d= -f2 | tr -d '[:space:]')
+    vb_eod=$(grep -E '^VB_EOD_CLOSE_HHMM=' "$ENV_FILE" 2>/dev/null | tail -1 | cut -d'#' -f1 | cut -d= -f2 | tr -d '[:space:]')
+    vb_sma=$(grep -E '^VB_SMA_MAX_GAP_PCT=' "$ENV_FILE" 2>/dev/null | tail -1 | cut -d'#' -f1 | cut -d= -f2 | tr -d '[:space:]')
+    vb_sc=$(grep -E '^VB_MIN_SCORE=' "$ENV_FILE" 2>/dev/null | tail -1 | cut -d'#' -f1 | cut -d= -f2 | tr -d '[:space:]')
 
     [ -z "$mock" ] && mock="true"
     [ -z "$live" ] && live="false"
     [ -z "$maxpos" ] && maxpos="0.15"
+    [ -z "$vb_cap" ] && vb_cap="0.30"
+    [ -z "$vb_max" ] && vb_max="3"
+    [ -z "$vb_k" ] && vb_k="0.5"
+    [ -z "$vb_stop" ] && vb_stop="2.0"
+    [ -z "$vb_eod" ] && vb_eod="1450"
+    [ -z "$vb_sma" ] && vb_sma="12.0"
+    [ -z "$vb_sc" ] && vb_sc="60.0"
 
     local mode_label
     if [ "$mock" = "true" ]; then
@@ -97,6 +111,8 @@ safety_status() {
         mode_label="🔴 실전투자"
     fi
     echo "  $mode_label | MAX_POSITION_PCT=$maxpos | LIVE_CONFIRMED=$live"
+    echo "  💥 VB전략: 자금${vb_cap}(최대${vb_max}포지션) | k=${vb_k} | 손절-${vb_stop}% | 강제청산${vb_eod:0:2}:${vb_eod:2:2}"
+    echo "     VB풀: SMA20+${vb_sma}% 이내 + 점수${vb_sc}+ 종목 (SMA20 근접 안정형)"
 }
 
 token_status() {
