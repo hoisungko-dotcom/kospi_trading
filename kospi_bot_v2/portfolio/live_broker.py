@@ -59,17 +59,23 @@ class KISLiveBroker:
                 now - self._last_sync_t,
             )
             return
+        self._last_sync_t = now
         raw = self.client.get_balance()
         if not raw:
             self._sync_fail_count += 1
-            if self._sync_fail_count >= 3:
+            if self._sync_fail_count >= 3 and not has_cached_state:
                 ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 msg = (
                     f"❌ 한국봇 v4.3 KIS 잔고조회 {self._sync_fail_count}회 연속 실패\n"
-                    f"equity=0 상태 — 즉시 확인 필요\n"
+                    f"캐시된 계좌 상태 없음 — 즉시 확인 필요\n"
                     f"시각: {ts}"
                 )
                 self._alert(msg)
+            elif self._sync_fail_count >= 3:
+                logger.warning(
+                    "⚠️ KIS live sync failed %d times, but cached account state is preserved",
+                    self._sync_fail_count,
+                )
             if not self.positions and self.cash <= 0:
                 logger.warning(
                     "⚠️ KIS live sync skipped: balance unavailable, no cached account state yet"
@@ -83,7 +89,6 @@ class KISLiveBroker:
             return
         else:
             self._sync_fail_count = 0
-            self._last_sync_t = now
         balance = raw or {}
         self.cash = float(balance.get("cash", 0) or 0)
         holdings = balance.get("holdings", {}) or {}
