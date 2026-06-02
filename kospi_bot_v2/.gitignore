@@ -1,0 +1,8 @@
+__pycache__/
+*.py[cod]
+data/*.jsonl
+data/*.pid
+data/tmp_*.csv
+logs/*.log
+reports/*.md
+!reports/.gitkeep

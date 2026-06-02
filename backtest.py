@@ -150,7 +150,7 @@ class KOSPIBacktester:
             }
 
             final_score = self.signal_engine.calculate_score(symbol, price_data)
-            signal = self.signal_engine.detect_signal(symbol, price_data)
+            signal, _ = self.signal_engine.detect_signal(symbol, price_data)
             
             # 3. 매매 로직
             # 매수: 신호 발생 + 미보유 + 시장 조건 충족

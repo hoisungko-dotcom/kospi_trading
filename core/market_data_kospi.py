@@ -5,9 +5,10 @@ import logging
 import yfinance as yf
 from datetime import datetime, timedelta
 import requests
-from pykrx import stock
+# pykrx 제거 — KIS 실패 시 yfinance fallback 사용 (인증 불필요)
 
 logger = logging.getLogger(__name__)
+logging.getLogger("yfinance").setLevel(logging.CRITICAL)
 
 # 6자리 숫자로만 이루어진 정상 종목코드 패턴 (우선주·특수종목 제외)
 _VALID_CODE = re.compile(r'^\d{6}$')
@@ -100,18 +101,27 @@ class MarketDataKOSPI:
                     df['date'] = df['date'].astype(str)
                     return df[['date', 'open', 'high', 'low', 'close', 'volume']].tail(lookback)
 
-                # 2. pykrx 폴백 — KIS API 실패 시
-                try:
-                    end_date   = datetime.now().strftime('%Y%m%d')
-                    start_date = (datetime.now() - timedelta(days=int(lookback * 1.5))).strftime('%Y%m%d')
-                    df = stock.get_market_ohlcv_by_date(start_date, end_date, symbol)
-                    df = df.reset_index()
-                    df.columns = ['date', 'open', 'high', 'low', 'close', 'volume', 'change']
-                    if not df.empty and len(df) >= 20:
-                        df['date'] = df['date'].dt.strftime('%Y%m%d')
-                        return df[['date', 'open', 'high', 'low', 'close', 'volume']].tail(lookback)
-                except Exception:
-                    pass
+                # 2. yfinance 폴백 — KIS API 데이터 부족 시 (.KS -> .KQ 순 시도)
+                for suffix in [".KS", ".KQ"]:
+                    try:
+                        df_yf = yf.download(
+                            f"{symbol}{suffix}", period="6mo",
+                            auto_adjust=True, progress=False,
+                        )
+                        if isinstance(df_yf.columns, pd.MultiIndex):
+                            df_yf.columns = df_yf.columns.get_level_values(0)
+                        df_yf = df_yf.dropna(how="all")
+                        if len(df_yf) < 20:
+                            continue
+                        df_yf = df_yf.reset_index()
+                        df_yf["date"] = pd.to_datetime(df_yf["Date"]).dt.strftime("%Y%m%d")
+                        df_yf = df_yf.rename(columns={
+                            "Open": "open", "High": "high",
+                            "Low": "low", "Close": "close", "Volume": "volume",
+                        })
+                        return df_yf[["date","open","high","low","close","volume"]].tail(lookback)
+                    except Exception:
+                        continue
 
                 return None
 
@@ -229,34 +239,14 @@ class MarketDataKOSPI:
         except: return None
 
     def get_kospi_constituents(self):
-        """코스피 & 코스닥 주요 종목 리스트 통합"""
-        all_constituents = []
-        try:
-            target_date = (datetime.now() - timedelta(days=0)).strftime('%Y%m%d')
-            # 1. 코스피 상위 30개
-            try:
-                kospi_tickers = stock.get_market_ticker_list(target_date, market="KOSPI")[:30]
-                for t in kospi_tickers:
-                    all_constituents.append({'symbol': t, 'name': stock.get_market_ticker_name(t)})
-            except: pass
-
-            # 2. 코스닥 상위 20개
-            try:
-                kosdaq_tickers = stock.get_market_ticker_list(target_date, market="KOSDAQ")[:20]
-                for t in kosdaq_tickers:
-                    all_constituents.append({'symbol': t, 'name': stock.get_market_ticker_name(t)})
-            except: pass
-
-            if len(all_constituents) > 10:
-                return all_constituents
-            raise Exception("Insufficient data from KRX")
-
-        except Exception:
-            # 실패 시 하이브리드 백업 리스트 (코스피 + 코스닥 핵심주)
-            fallback_list = [
-                ('005930', '삼성전자'), ('000660', 'SK하이닉스'), ('005380', '현대차'), ('000270', '기아'),
-                ('068270', '셀트리온'), ('005490', 'POSCO홀딩스'), ('035420', 'NAVER'),
-                ('091990', '셀트리온헬스케어'), ('086520', '에코프로'), ('247540', '에코프로비엠'),
-                ('196170', '알테오젠'), ('028300', 'HLB'), ('112040', '위메이드')
-            ]
-            return [{'symbol': s, 'name': n} for s, n in fallback_list]
+        """코스피/코스닥 대표 종목 (하드코딩 백업 — main 흐름 미사용)"""
+        return [
+            {"symbol": "005930", "name": "삼성전자"},
+            {"symbol": "000660", "name": "SK하이닉스"},
+            {"symbol": "005380", "name": "현대차"},
+            {"symbol": "000270", "name": "기아"},
+            {"symbol": "068270", "name": "셀트리온"},
+            {"symbol": "035420", "name": "NAVER"},
+            {"symbol": "086520", "name": "에코프로"},
+            {"symbol": "247540", "name": "에코프로비엠"},
+        ]

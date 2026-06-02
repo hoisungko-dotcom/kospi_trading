@@ -238,6 +238,15 @@ class KISClient:
                             time.sleep(1.5)
                             expired_token = True
                             break
+                        if _err.get("msg_cd") == "EGW00123" and auth_attempt == 0:
+                            logger.warning("⚠️ 토큰 만료 감지 (HTTP 5xx) — 주문 토큰 재발급 후 재시도")
+                            self._delete_cached_token(self.trade_appkey)
+                            self.trade_token = self._get_token(
+                                self.trade_base_url, self.trade_appkey, self.trade_appsecret
+                            )
+                            headers["authorization"] = f"Bearer {self.trade_token}"
+                            expired_token = True
+                            break
                         logger.error(f"❌ 국내 잔고 조회 실패 HTTP {response.status_code}: {response.text[:200]}")
                         return None
                     data = response.json()

@@ -8,6 +8,7 @@ KOSPI 6 + KOSDAQ 4 집중 거래 시스템
 """
 import os
 import sys
+import math
 
 # Windows 한글 인코딩 오류 방지 (cp1252 → utf-8)
 if sys.platform == 'win32':
@@ -84,6 +85,10 @@ TOP10_JSON = DATA_DIR / "top_10_daily.json"
 LOCK_FILE = DATA_DIR / "kospi_bot.lock"
 REENTRY_COOLDOWN_JSON = DATA_DIR / "sell_reentry_cooldowns.json"
 PROFIT_HARVEST_JSON = DATA_DIR / "profit_harvest_state.json"
+TRADES_LOG       = LOG_DIR / "trades.jsonl"
+REJECTIONS_LOG   = LOG_DIR / "rejections.jsonl"
+POOL_COMPARE_LOG = LOG_DIR / "pool_compare.jsonl"
+SHADOW_PERF_LOG  = LOG_DIR / "shadow_perf.jsonl"
 _LOCK_HANDLE = None
 
 
@@ -175,12 +180,12 @@ class KospiTopTenSystem:
     """코스피 6 + 코스닥 4 매수후보 선정 + 보유 종목 매도 모니터링"""
 
     KST              = pytz.timezone('Asia/Seoul')
-    POSITION_AMOUNT  = 5_000_000   # 종목당 투자금 500만원
+    POSITION_AMOUNT  = int(os.getenv("POSITION_AMOUNT", "999999999"))   # v4.3 기본: 계좌 비중으로 제한
     STOP_LOSS_PCT    = -3.0        # 하드 손절 기준 (-3%)
     KOSPI_COUNT      = 6           # 매수후보 코스피 종목 수
     KOSDAQ_COUNT     = 4           # 매수후보 코스닥 종목 수
-    MAX_HOLDINGS     = int(os.getenv("MAX_STRATEGY_POSITIONS", "10"))  # 봇 신규 진입(strategy) 최대 종목 수
-    KOSDAQ_TOP_N     = 300         # 코스닥 시총 상위 N개만 스캔
+    MAX_HOLDINGS     = int(os.getenv("MAX_STRATEGY_POSITIONS", "8"))  # v4.3: 8슬롯 고정
+    KOSDAQ_TOP_N     = int(os.getenv("KOSDAQ_TOP_N", "300"))  # 코스닥 시총 상위 N개만 스캔
     RESCREEN_INTERVAL_SEC = int(os.getenv("RESCREEN_INTERVAL_SEC", "600"))  # 장중 재선정 주기 (기본 10분)
     BUY_FAIL_COOLDOWN_SEC = 3600   # 매수 실패 종목 재시도 대기 (1시간)
 
@@ -226,17 +231,25 @@ class KospiTopTenSystem:
         self._market_condition: dict = {           # 시장 변동성 필터 상태
             'trend_ok': True, 'volatility_ok': True, 'volatility_pct': 0.0,
         }
+        # 풀 비교용 섀도 후보 (11~20위 — 실거래 안 함, 신호만 추적)
+        self.shadow_candidates: list[str] = []
         # 폭락 반등 예외 매수
         self._crash_buy_count_today: int = 0
         self._crash_buy_date: str = ""
         self._crash_buy_cooldowns: dict[str, float] = {}   # 종목별 쿨다운
         self._ai_market_cache: tuple | None = None         # (threshold, timestamp) — 30분 캐시
         self.rescan_pool: list[str] = []                    # 아침 스캔 점수 상위 종목풀 (재선정 전용)
+        self._ohlcv_cache: dict[str, tuple] = {}           # {sym: (price_data, timestamp)} — 일봉 캐시
+        self._ohlcv_cache_ttl: int = int(os.getenv("OHLCV_CACHE_TTL_SEC", "300"))  # 기본 5분
 
         # 변동성 돌파(VB) 전략
         self.vb_candidates: dict[str, float] = {}          # {symbol: entry_price}
         self.vb_entered_today: set[str]      = set()       # 당일 이미 진입한 VB 종목
         self.vb_candidate_date: str          = ""          # vb_candidates 유효 날짜
+        self.vb_split_sold: set[str]         = set()       # 14:50 1차 분할 매도 완료 VB 종목
+
+        # 장 시작 후 개장 검증
+        self._opening_validated: bool        = False       # 09:05 1회 watchlist 유동성 재검증 완료 여부
 
         # AI 매도 판단 클라이언트 (ANTHROPIC_API_KEY 없으면 비활성)
         api_key = os.getenv("ANTHROPIC_API_KEY", "")
@@ -250,6 +263,12 @@ class KospiTopTenSystem:
         saved = self._load_top10()
         self.top_10_symbols: list[str] = saved['symbols']
         self.kospi_symbols_set          = set(saved['kospi_set'])
+        if saved.get('rescan_pool'):
+            self.rescan_pool = saved['rescan_pool']
+
+        # 전략 성과 기반 비중 조정 캐시
+        self._strategy_multipliers: dict[str, float] = {}
+        self._strategy_multipliers_ts: float = 0.0  # 마지막 산출 시각 (epoch)
 
     def _update_daily_pnl(self, realized_pnl: float):
         """당일 실현 손익 누적 및 서킷브레이커 판단."""
@@ -303,6 +322,257 @@ class KospiTopTenSystem:
             )
         except Exception as e:
             logger.warning(f"⚠️ KIS 동기화 예외 — 로컬 포트폴리오 유지: {e}")
+
+    # ── 구조화 거래 로그 ──────────────────────────────────────────────────
+
+    def _log_trade_entry(self, symbol: str, price: float, quantity: int,
+                          entry_type: str, score: float,
+                          market_phase: str, position_pct: float):
+        record = {
+            "event": "ENTRY",
+            "ts": datetime.now(self.KST).isoformat(),
+            "symbol": symbol,
+            "entry_type": entry_type,
+            "price": price,
+            "quantity": quantity,
+            "amount": round(price * quantity),
+            "score": score,
+            "market_phase": market_phase,
+            "position_pct": round(position_pct * 100, 1),
+        }
+        try:
+            with open(TRADES_LOG, "a", encoding="utf-8") as f:
+                f.write(json.dumps(record, ensure_ascii=False) + "\n")
+        except Exception as e:
+            logger.debug(f"거래 로그 기록 실패: {e}")
+
+    def _recover_entry_type(self, symbol: str) -> str:
+        """trades.jsonl에서 해당 심볼의 가장 최근 ENTRY entry_type 복원."""
+        if not TRADES_LOG.exists():
+            return ''
+        last = ''
+        try:
+            with open(TRADES_LOG, encoding='utf-8') as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        r = json.loads(line)
+                    except Exception:
+                        continue
+                    if r.get('event') == 'ENTRY' and r.get('symbol') == symbol:
+                        et = r.get('entry_type', '')
+                        if et and et != 'UNKNOWN':
+                            last = et
+        except Exception:
+            pass
+        return last
+
+    def _log_trade_exit(self, symbol: str, price: float, quantity: int,
+                         reason: str, holding_snap: dict):
+        buy_price = float(holding_snap.get('price', 0) or 0)
+        entry_time_str = holding_snap.get('entry_time', '')
+        profit_pct = (price - buy_price) / buy_price * 100 if buy_price > 0 else 0.0
+        hold_sec = 0
+        if entry_time_str:
+            try:
+                from datetime import timezone
+                entry_dt = datetime.fromisoformat(entry_time_str)
+                hold_sec = int((datetime.now(self.KST) - entry_dt).total_seconds())
+            except Exception:
+                pass
+        # sell_type: reason 문자열 앞부분 추출
+        if reason.startswith("AI"):
+            sell_type = "AI_SELL_EXIT"
+        elif "손절" in reason:
+            sell_type = "STOP_LOSS"
+        elif "트레일링" in reason:
+            sell_type = "TRAILING_STOP"
+        elif "부분익절" in reason or "AI부분익절" in reason:
+            sell_type = "PARTIAL_PROFIT"
+        elif "VB당일청산" in reason or "VB손절" in reason:
+            sell_type = "VB_EOD_CLOSE"
+        elif "브레이크이븐" in reason:
+            sell_type = "BREAKEVEN_STOP"
+        elif "EOD" in reason or "장마감" in reason or "약세" in reason:
+            sell_type = "EOD_CLEANUP"
+        elif "목표" in reason:
+            sell_type = "TARGET_PROFIT"
+        else:
+            sell_type = "OTHER"
+        # entry_type 복원: holding_snap → trades.jsonl ENTRY 기록 순으로 fallback
+        _et = holding_snap.get('entry_type', '')
+        if not _et or _et in ('UNKNOWN', 'RESTORED'):
+            _recovered = self._recover_entry_type(symbol)
+            if _recovered:
+                logger.debug(f"  [{symbol}] entry_type 복원: {_et!r} → {_recovered!r}")
+                _et = _recovered
+        if not _et:
+            _et = 'UNKNOWN'
+
+        record = {
+            "event": "EXIT",
+            "ts": datetime.now(self.KST).isoformat(),
+            "symbol": symbol,
+            "entry_type": _et,
+            "sell_type": sell_type,
+            "price": price,
+            "buy_price": buy_price,
+            "quantity": quantity,
+            "profit_pct": round(profit_pct, 2),
+            "hold_sec": hold_sec,
+            "reason": reason[:80],
+        }
+        try:
+            with open(TRADES_LOG, "a", encoding="utf-8") as f:
+                f.write(json.dumps(record, ensure_ascii=False) + "\n")
+        except Exception as e:
+            logger.debug(f"거래 로그 기록 실패: {e}")
+
+    def _log_rejection(self, symbol: str, score: float, reason: str,
+                        market_phase: str, pool_rank: int = 0,
+                        reject_price: float = 0.0):
+        record = {
+            "event": "REJECTION",
+            "ts": datetime.now(self.KST).isoformat(),
+            "symbol": symbol,
+            "pool_rank": pool_rank,
+            "score": round(score, 1),
+            "market_phase": market_phase,
+            "reasons": reason,
+            "reject_price": reject_price,
+        }
+        try:
+            with open(REJECTIONS_LOG, "a", encoding="utf-8") as f:
+                f.write(json.dumps(record, ensure_ascii=False) + "\n")
+        except Exception as e:
+            logger.debug(f"탈락 로그 기록 실패: {e}")
+
+    def _log_pool_paper_signal(self, symbol: str, pool_rank: int, score: float,
+                                signal: str, reason: str, market_phase: str):
+        record = {
+            "event": "PAPER_SIGNAL",
+            "ts": datetime.now(self.KST).isoformat(),
+            "symbol": symbol,
+            "pool_rank": pool_rank,
+            "score": round(score, 1),
+            "signal": signal,
+            "reason": reason,
+            "market_phase": market_phase,
+        }
+        try:
+            with open(POOL_COMPARE_LOG, "a", encoding="utf-8") as f:
+                f.write(json.dumps(record, ensure_ascii=False) + "\n")
+        except Exception as e:
+            logger.debug(f"풀비교 로그 기록 실패: {e}")
+
+    def _daily_performance_report(self):
+        """당일 trades.jsonl 기반 전략별 성과 집계 → 텔레그램 전송."""
+        try:
+            today = datetime.now(self.KST).strftime('%Y-%m-%d')
+            if not TRADES_LOG.exists():
+                return
+
+            from collections import defaultdict
+            entries: dict[str, dict] = {}
+            perf: dict[str, dict] = defaultdict(lambda: {
+                "wins": 0, "losses": 0, "total_pnl": 0.0,
+                "hold_sec": 0, "count": 0, "max_loss": 0.0,
+            })
+
+            with open(TRADES_LOG, encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        r = json.loads(line)
+                    except Exception:
+                        continue
+                    if r.get("event") == "ENTRY" and r.get("ts", "").startswith(today):
+                        entries[r.get("symbol", "")] = r
+                    elif r.get("event") == "EXIT" and r.get("ts", "").startswith(today):
+                        et = r.get("entry_type", "UNKNOWN")
+                        pnl = float(r.get("profit_pct", 0))
+                        hs  = int(r.get("hold_sec", 0))
+                        perf[et]["count"] += 1
+                        perf[et]["total_pnl"] += pnl
+                        perf[et]["hold_sec"] += hs
+                        if pnl > 0:
+                            perf[et]["wins"] += 1
+                        else:
+                            perf[et]["losses"] += 1
+                        if pnl < perf[et]["max_loss"]:
+                            perf[et]["max_loss"] = pnl
+
+            # 탈락 사유 상위 5개
+            top_rejects: dict[str, int] = defaultdict(int)
+            if REJECTIONS_LOG.exists():
+                with open(REJECTIONS_LOG, encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            r = json.loads(line)
+                        except Exception:
+                            continue
+                        if r.get("ts", "").startswith(today):
+                            for part in r.get("reasons", "").split(","):
+                                part = part.strip()
+                                if part:
+                                    top_rejects[part] += 1
+
+            # 풀 비교: 섀도 풀 BUY 신호 건수
+            shadow_buy_count = 0
+            if POOL_COMPARE_LOG.exists():
+                with open(POOL_COMPARE_LOG, encoding="utf-8") as f:
+                    for line in f:
+                        try:
+                            r = json.loads(line.strip())
+                            if r.get("ts", "").startswith(today) and r.get("signal") == "BUY":
+                                shadow_buy_count += 1
+                        except Exception:
+                            pass
+
+            total = sum(v["count"] for v in perf.values())
+            if total == 0 and not top_rejects:
+                logger.info(f"📊 [{today}] 당일 체결 없음 — 성과 리포트 생략")
+                return
+
+            lines = [f"📊 일간 성과 리포트 [{today}]"]
+            lines.append(f"총 {total}건 체결\n")
+
+            if perf:
+                lines.append("[ 전략별 성과 ]")
+                for et, v in sorted(perf.items(), key=lambda x: x[1]["count"], reverse=True):
+                    n   = v["count"]
+                    wr  = v["wins"] / n * 100 if n else 0
+                    avg = v["total_pnl"] / n if n else 0
+                    ml  = v["max_loss"]
+                    avgh = v["hold_sec"] // n // 60 if n else 0
+                    lines.append(
+                        f"  {et}\n"
+                        f"  {n}건 | 승률{wr:.0f}% | 평균{avg:+.1f}% | 최대손실{ml:.1f}% | 보유{avgh}분"
+                    )
+
+            if top_rejects:
+                lines.append("\n[ 매수 탈락 사유 Top5 ]")
+                for reason, cnt in sorted(top_rejects.items(), key=lambda x: x[1], reverse=True)[:5]:
+                    lines.append(f"  {reason}: {cnt}건")
+
+            if shadow_buy_count > 0:
+                lines.append(f"\n[ 풀 비교 ] 섀도후보(11~20위) BUY 신호: {shadow_buy_count}건 (미거래)")
+
+            msg = "\n".join(lines)
+            logger.info(msg)
+            try:
+                self.reporter.send_message(msg)
+            except Exception as e:
+                logger.debug(f"성과 리포트 텔레그램 실패: {e}")
+        except Exception as e:
+            logger.warning(f"⚠️ 일간 성과 리포트 오류: {e}")
 
     def _sync_portfolio_from_kis_throttled(self, reason: str = "장중"):
         """장중 입금/수동 변경을 반영하되 KIS 잔고 API 호출은 과도하지 않게 제한."""
@@ -454,6 +724,34 @@ class KospiTopTenSystem:
             )
 
         return "SWING", "추세는 있으나 과열·꼬리 부담 일부 — 중기 대응"
+
+    def _buy_minute_confirm(self, symbol: str, cur_price: float) -> tuple[bool, str]:
+        """매수 직전 1분봉 확인 — 단기 역전(하락 전환) 감지 시 진입 차단.
+
+        분봉 데이터 미수신 시 통과(차단하지 않음).
+        """
+        if os.getenv("BUY_MINUTE_CONFIRM_ENABLED", "true").lower() != "true":
+            return True, ""
+        try:
+            mdf = self.kis_client.get_intraday_ohlcv(symbol, interval='1m', lookback=6)
+            if mdf is None or len(mdf) < 4:
+                return True, ""  # 데이터 부족 → 통과
+            closes = mdf['close'].astype(float).values
+            volumes = mdf['volume'].astype(float).values
+            # 최근 3봉 중 2봉 이상 하락 → 단기 역전
+            diffs = [closes[i] - closes[i - 1] for i in range(-3, 0)]
+            down_count = sum(1 for d in diffs if d < 0)
+            if down_count >= 2:
+                return False, f"1분봉 하락전환({down_count}/3봉 하락)"
+            # 최근 2봉 거래량이 앞선 2봉의 절반 미만 → 수급 소멸
+            recent_vol = float(volumes[-1]) + float(volumes[-2])
+            prev_vol   = float(volumes[-3]) + float(volumes[-4])
+            if prev_vol > 0 and recent_vol < prev_vol * 0.4:
+                return False, f"1분봉 거래량 소멸({recent_vol:.0f}<{prev_vol*0.4:.0f})"
+            return True, ""
+        except Exception as e:
+            logger.debug(f"[{symbol}] 분봉 확인 실패(통과): {e}")
+            return True, ""
 
     def _minute_state(self, df, lookback: int = 10) -> dict:
         if df is None or len(df) < 5:
@@ -792,15 +1090,23 @@ class KospiTopTenSystem:
                 logger.warning(f"⚠️ [VB] {symbol} 주문 실패")
                 return False
 
-            self.position_mgr.add_position(symbol, quantity, order_price, source='vb')
+            self.position_mgr.add_position(symbol, quantity, order_price, source='vb', entry_type='VB_INTRADAY')
+            vb_entry_ts = datetime.now(self.KST).isoformat()
             self.position_mgr.update_position_metadata(
                 symbol,
                 strategy_profile='SCALP',
                 strategy_profile_reason='변동성돌파전략(VB)',
-                strategy_profile_time=datetime.now(self.KST).isoformat(),
+                strategy_profile_time=vb_entry_ts,
                 effective_profile='SCALP',
                 vb_stop_price=stop_price,
+                entry_type='VB_INTRADAY',
+                entry_time=vb_entry_ts,
+                entry_position_pct=round(vb_capital_pct / vb_max_positions * 100, 1),
             )
+            self._log_trade_entry(symbol, order_price, quantity,
+                                  'VB_INTRADAY', 0.0,
+                                  self._market_condition.get('market_mode', 'UNKNOWN'),
+                                  vb_capital_pct / vb_max_positions)
             logger.info(f"  ✅ [VB] {symbol} 진입 완료 — 손절 ₩{stop_price:,.0f}")
             try:
                 self.reporter.send_message(
@@ -1220,16 +1526,31 @@ class KospiTopTenSystem:
         if volatility_pct > hard_vol_limit:
             return False, f"변동성 하드컷 초과 {volatility_pct:.1f}%>{hard_vol_limit:.1f}%"
 
-        if volatility_pct > strong_trend_limit:
-            return False, f"강한 상승장 허용폭 초과 {volatility_pct:.1f}%>{strong_trend_limit:.1f}%"
+        # 섹터 모멘텀 연동: 상위 섹터 종목은 진입 점수 완화
+        sector_bonus = 0.0
+        sector_name  = ''
+        try:
+            sector_bonus = self.sector_monitor.get_sector_bonus(symbol)
+            sector_name  = self.sector_monitor.get_sector_name(symbol) or ''
+        except Exception:
+            pass
+        # 섹터 모멘텀 0.05 이상(상위권) → 5pt 완화, 0.02 이상 → 3pt 완화
+        sector_discount  = 5.0 if sector_bonus >= 0.05 else (3.0 if sector_bonus >= 0.02 else 0.0)
+        effective_score  = override_score - sector_discount
 
-        if score < override_score:
-            return False, f"점수 부족 {score:.1f}<{override_score:.0f}"
+        # strong_trend_limit 초과(5.5~6.0%) 구간: 상위 섹터 종목만 진입 허용
+        if volatility_pct > strong_trend_limit and sector_discount == 0:
+            return False, f"강한 상승장 허용폭 초과 {volatility_pct:.1f}%>{strong_trend_limit:.1f}% (상위 섹터 아님)"
 
+        if score < effective_score:
+            discount_str = f" (섹터 {sector_name} 완화 -{sector_discount:.0f}pt)" if sector_discount > 0 else ""
+            return False, f"점수 부족 {score:.1f}<{effective_score:.0f}{discount_str}"
+
+        discount_str = f" (섹터 {sector_name} 모멘텀 -{sector_discount:.0f}pt 완화)" if sector_discount > 0 else ""
         return True, (
-            f"강한 상승장 선택 허용: 점수 {score:.1f}>={override_score:.0f}, "
+            f"강한 상승장 선택 허용: 점수 {score:.1f}>={effective_score:.0f}{discount_str}, "
             f"KOSPI+{mc.get('trend_gap_pct', 0):.1f}%, "
-            f"변동성 {volatility_pct:.1f}%<={strong_trend_limit:.1f}%"
+            f"변동성 {volatility_pct:.1f}%<={hard_vol_limit:.1f}%"
         )
 
     def show_balance(self):
@@ -1242,35 +1563,41 @@ class KospiTopTenSystem:
         DATA_DIR.mkdir(exist_ok=True)
         TOP10_JSON.write_text(
             json.dumps({
-                'date'      : datetime.now(self.KST).strftime('%Y%m%d'),
-                'symbols'   : symbols,
-                'kospi_set' : [s for s in symbols if s in self.kospi_symbols_set],
+                'date'        : datetime.now(self.KST).strftime('%Y%m%d'),
+                'symbols'     : symbols,
+                'kospi_set'   : [s for s in symbols if s in self.kospi_symbols_set],
+                'rescan_pool' : self.rescan_pool,
             }, ensure_ascii=False, indent=2),
             encoding='utf-8',
         )
 
     def _load_top10(self) -> dict:
-        """오늘 날짜의 매수후보 + 코스피 구분 정보 복원"""
+        """오늘 날짜의 매수후보 + 코스피 구분 + 재선정 풀 복원"""
         if not TOP10_JSON.exists():
-            return {'symbols': [], 'kospi_set': []}
+            return {'symbols': [], 'kospi_set': [], 'rescan_pool': []}
         try:
             obj   = json.loads(TOP10_JSON.read_text(encoding='utf-8'))
             today = datetime.now(self.KST).strftime('%Y%m%d')
             if obj.get('date') == today:
                 syms  = obj.get('symbols', [])
                 kospi = obj.get('kospi_set', syms)
-                logger.info(f"📂 매수후보 복원: {syms}")
-                return {'symbols': syms, 'kospi_set': kospi}
+                pool  = obj.get('rescan_pool', [])
+                logger.info(f"📂 매수후보 복원: {syms}" + (f" | 재선정풀 {len(pool)}종목" if pool else ""))
+                return {'symbols': syms, 'kospi_set': kospi, 'rescan_pool': pool}
         except Exception:
             pass
-        return {'symbols': [], 'kospi_set': []}
+        return {'symbols': [], 'kospi_set': [], 'rescan_pool': []}
 
     # ── 종목 리스트 ────────────────────────────────────────────────────────
 
     def get_kospi_symbols(self) -> list[str]:
         try:
-            codes = fdr.StockListing("KOSPI")["Code"].tolist()
-            return [c for c in codes if is_valid_code(c)]
+            df = fdr.StockListing("KOSPI")
+            df = df[df["Code"].apply(is_valid_code)]
+            top_n = int(os.getenv("KOSPI_SCAN_TOP_N", "0") or 0)
+            if top_n > 0 and 'Marcap' in df.columns:
+                df = df.nlargest(top_n, 'Marcap')
+            return df["Code"].tolist()
         except Exception as e:
             logger.error(f"KOSPI 종목 조회 실패: {e}")
             return []
@@ -1284,6 +1611,35 @@ class KospiTopTenSystem:
         except Exception as e:
             logger.error(f"KOSDAQ 종목 조회 실패: {e}")
             return []
+
+    def _candidate_score_after_heat_filter(self, symbol: str, data: dict, score: float) -> tuple[float | None, str]:
+        close = float(data.get('close', 0) or 0)
+        close_5 = float(data.get('close_5d_ago', close) or close)
+        close_20 = float(data.get('close_20d_ago', close) or close)
+        if close <= 0 or close_5 <= 0 or close_20 <= 0:
+            return score, ""
+        return5 = close / close_5 - 1
+        return20 = close / close_20 - 1
+        rsi = float(data.get('rsi', 50) or 50)
+        penalty = 0.0
+        reasons: list[str] = []
+        if return20 >= float(os.getenv("CANDIDATE_BLOCK_RETURN20", "0.60") or 0.60):
+            return None, f"20일 과열 {return20 * 100:.1f}%"
+        if return20 >= float(os.getenv("CANDIDATE_LATE_RETURN20", "0.45") or 0.45) and return5 <= 0.08:
+            return None, f"상승후 둔화 {return20 * 100:.1f}%/{return5 * 100:.1f}%"
+        if return5 >= float(os.getenv("CANDIDATE_BLOCK_RETURN5", "0.25") or 0.25):
+            return None, f"5일 급등 {return5 * 100:.1f}%"
+        if return5 >= 0.15:
+            penalty += 12
+            reasons.append(f"5일 +{return5 * 100:.1f}%")
+        if return20 >= 0.30:
+            penalty += 8
+            reasons.append(f"20일 +{return20 * 100:.1f}%")
+        if rsi >= 78:
+            penalty += 8
+            reasons.append(f"RSI {rsi:.1f}")
+        adjusted = max(0.0, score - penalty)
+        return adjusted, ", ".join(reasons)
 
     # ── 08:30 아침 스크리닝 ────────────────────────────────────────────────
 
@@ -1336,6 +1692,12 @@ class KospiTopTenSystem:
             self.db.insert_price_data(sym, r['name'], market, r['data'])
             sector_bonus = self.sector_monitor.get_sector_bonus(sym)
             score = self.analyzer.calculate_score(sym, r['data'], sector_bonus=sector_bonus)
+            score, heat_reason = self._candidate_score_after_heat_filter(sym, r['data'], score)
+            if score is None:
+                logger.info(f"  🔥 [{sym}] 후보 제외 — {heat_reason}")
+                continue
+            if heat_reason:
+                logger.info(f"  🌡️ [{sym}] 후보 점수 감점 — {heat_reason} → {score:.1f}")
             price_map[sym] = r['data']['close']
             vb_data_map[sym] = r['data']
             if sym in self.kospi_symbols_set:
@@ -1364,8 +1726,50 @@ class KospiTopTenSystem:
         top_kospi  = _dedup_preferred(kospi_scores)[:self.KOSPI_COUNT]
         top_kosdaq = _dedup_preferred(kosdaq_scores)[:self.KOSDAQ_COUNT]
 
+        # 외국계 순매수 실데이터로 top 후보 CBD 갱신 (프록시 → 실거래 대체)
+        top_candidates = top_kospi + top_kosdaq
+        for _sym in top_candidates:
+            if _sym not in vb_data_map:
+                continue
+            try:
+                flow = self.kis_client.get_foreign_net_buying(_sym, lookback=5)
+                if flow:
+                    real_cbd = 0
+                    for f in reversed(flow):
+                        if f.get('foreigner_net', 0) > 0:
+                            real_cbd += 1
+                        else:
+                            break
+                    proxy_cbd = vb_data_map[_sym].get('consecutive_buy_days', 0)
+                    vb_data_map[_sym]['consecutive_buy_days'] = real_cbd
+                    # 실데이터로 점수 재계산
+                    _sb = self.sector_monitor.get_sector_bonus(_sym)
+                    new_sc = self.analyzer.calculate_score(_sym, vb_data_map[_sym], sector_bonus=_sb)
+                    if _sym in kospi_scores:
+                        kospi_scores[_sym] = new_sc
+                    else:
+                        kosdaq_scores[_sym] = new_sc
+                    logger.info(
+                        f"  🌍 [{_sym}] 외국계 순매수 {real_cbd}일 "
+                        f"(프록시 {proxy_cbd}일 → 실거래) | 점수 {new_sc:.1f}"
+                    )
+            except Exception as _fe:
+                logger.debug(f"외국계 CBD 갱신 실패 ({_sym}): {_fe}")
+
+        # 외국계 실데이터 반영 후 최종 top10 재정렬
+        top_kospi  = _dedup_preferred(kospi_scores)[:self.KOSPI_COUNT]
+        top_kosdaq = _dedup_preferred(kosdaq_scores)[:self.KOSDAQ_COUNT]
+
         self.top_10_symbols = top_kospi + top_kosdaq
         self._save_top10(self.top_10_symbols)
+
+        # 풀 비교용 섀도 후보: 실거래 10개 이후 상위 10개 (11~20위)
+        _trading_set = set(self.top_10_symbols)
+        _shadow_kospi  = [s for s in _dedup_preferred(kospi_scores)  if s not in _trading_set][:self.KOSPI_COUNT]
+        _shadow_kosdaq = [s for s in _dedup_preferred(kosdaq_scores) if s not in _trading_set][:self.KOSDAQ_COUNT]
+        self.shadow_candidates = _shadow_kospi + _shadow_kosdaq
+        if self.shadow_candidates:
+            logger.info(f"  🔬 [풀비교] 섀도후보 {len(self.shadow_candidates)}개 (11~20위 추적): {self.shadow_candidates}")
 
         # 변동성 돌파 전략 AI 사전 필터
         today_str = datetime.now(self.KST).strftime('%Y-%m-%d')
@@ -1391,6 +1795,8 @@ class KospiTopTenSystem:
         self.vb_candidates    = self._vb_ai_prefilter(vb_input, all_scores_full, vb_data_map)
         self.vb_candidate_date = today_str
         self.vb_entered_today  = set()
+        self.vb_split_sold     = set()
+        self._opening_validated = False
         if self.vb_candidates:
             logger.info(f"  🎯 [VB] AI 승인 {len(self.vb_candidates)}종목: {list(self.vb_candidates.keys())}")
 
@@ -1438,11 +1844,9 @@ class KospiTopTenSystem:
                 for i, sym in enumerate(top_kosdaq, 1)
             )
             msg = (
-                f"🌅 아침 스크리닝 완료 ({elapsed:.0f}초)\n"
-                f"재선정 풀: {len(self.rescan_pool)}종목 | {market_str}\n"
-                f"KOSPI {mc.get('kospi',0):,.0f} (SMA20 대비 {mc.get('trend_gap_pct',0):+.1f}%) | 변동성 {mc.get('volatility_pct',0):.2f}%\n"
-                f"\n▶ 코스피 매수후보\n{kospi_lines}\n"
-                f"\n▶ 코스닥 매수후보\n{kosdaq_lines}"
+                f"🌅 장 시작\n"
+                f"KOSPI {mc.get('kospi',0):,.0f} ({mc.get('trend_gap_pct',0):+.1f}%) | {market_str}\n"
+                f"매수후보 {len(top_kospi)}개(KOSPI) + {len(top_kosdaq)}개(KOSDAQ)"
             )
             self.reporter.send_message(msg)
         except Exception as e:
@@ -1489,6 +1893,12 @@ class KospiTopTenSystem:
             sym   = r['symbol']
             sector_bonus = self.sector_monitor.get_sector_bonus(sym)
             score = self.analyzer.calculate_score(sym, r['data'], sector_bonus=sector_bonus)
+            score, heat_reason = self._candidate_score_after_heat_filter(sym, r['data'], score)
+            if score is None:
+                logger.info(f"  🔥 [{sym}] 재선정 제외 — {heat_reason}")
+                continue
+            if heat_reason:
+                logger.info(f"  🌡️ [{sym}] 재선정 점수 감점 — {heat_reason} → {score:.1f}")
             self.db.insert_price_data(sym, sym, 'KOSPI' if sym in self.kospi_symbols_set else 'KOSDAQ', r['data'])
             if sym in self.kospi_symbols_set:
                 kospi_scores[sym] = score
@@ -1511,6 +1921,13 @@ class KospiTopTenSystem:
         new_kospi  = _dedup_pref(kospi_scores)[:self.KOSPI_COUNT]
         new_kosdaq = _dedup_pref(kosdaq_scores)[:self.KOSDAQ_COUNT]
         new_candidates = new_kospi + new_kosdaq
+
+        # 풀 비교 섀도 후보 갱신
+        _tr_set = set(new_candidates)
+        self.shadow_candidates = (
+            [s for s in _dedup_pref(kospi_scores)  if s not in _tr_set][:self.KOSPI_COUNT]
+            + [s for s in _dedup_pref(kosdaq_scores) if s not in _tr_set][:self.KOSDAQ_COUNT]
+        )
 
         # 연속성 필터
         current_set = set(self.top_10_symbols)
@@ -1543,21 +1960,43 @@ class KospiTopTenSystem:
             logger.info(f"   📌 보유(계속 감시): {sorted(existing)}")
         logger.info("=" * 70)
 
-        # 장중 KIS 잔고 재동기화 — 로컬 예수금 drift 방지
-        try:
-            balance = self.kis_client.get_balance()
-            if balance:
-                self.position_mgr.sync_from_api(
-                    holdings=balance.get('holdings', {}),
-                    cash=balance.get('cash', 0),
-                )
-        except Exception as e:
-            logger.warning(f"⚠️ 장중 잔고 재동기화 실패 — 로컬 유지: {e}")
-
         # 시장 변동성 상태 갱신
         self._update_market_condition()
 
     # ── 09:00~15:30 장중 모니터링 ─────────────────────────────────────────
+
+    def _update_max_holdings(self) -> None:
+        """계좌 규모에 따라 MAX_HOLDINGS를 동적으로 조정."""
+        if os.getenv("KOSPI_V43_LIVE_FILTER", "true").lower() == "true":
+            prev = self.MAX_HOLDINGS
+            self.MAX_HOLDINGS = int(os.getenv("V43_MAX_POSITIONS", "8") or 8)
+            if self.MAX_HOLDINGS != prev:
+                logger.info(f"  📏 v4.3 최대종목 고정: {prev}→{self.MAX_HOLDINGS}개")
+            return
+
+        portfolio = self.position_mgr.portfolio
+        account_value = float(portfolio.get('total_value') or 0)
+        if account_value <= 0:
+            holdings_value = sum(
+                h.get('amount', h.get('price', 0) * h.get('quantity', 0))
+                for h in portfolio.get('holdings', {}).values()
+            )
+            account_value = float(portfolio.get('cash', 0)) + holdings_value
+        if account_value <= 0:
+            return
+
+        prev = self.MAX_HOLDINGS
+        if account_value < 3_000_000:
+            self.MAX_HOLDINGS = int(os.getenv("MAX_HOLDINGS_SMALL",  "3") or 3)   # ~300만: 3종목
+        elif account_value < 10_000_000:
+            self.MAX_HOLDINGS = int(os.getenv("MAX_HOLDINGS_MID",    "4") or 4)   # 300만~1000만: 4종목
+        else:
+            self.MAX_HOLDINGS = int(os.getenv("MAX_STRATEGY_POSITIONS", "5") or 5)  # 1000만+: 5종목 이상
+        if self.MAX_HOLDINGS != prev:
+            logger.info(
+                f"  📏 계좌규모별 최대종목 조정: {prev}→{self.MAX_HOLDINGS}개"
+                f" (계좌 ₩{account_value/10000:.0f}만)"
+            )
 
     def realtime_monitoring(self):
         """
@@ -1567,7 +2006,7 @@ class KospiTopTenSystem:
         if not self.is_market_open:
             return
 
-        self._sync_portfolio_from_kis_throttled("장중 모니터링")
+        self._update_max_holdings()  # 계좌 규모에 따라 최대 종목 수 갱신
 
         holdings     = set(self.position_mgr.portfolio['holdings'].keys())
         watch_set    = set(self.top_10_symbols)
@@ -1579,27 +2018,50 @@ class KospiTopTenSystem:
         now_str = datetime.now(self.KST).strftime('%H:%M:%S')
         now_hm = int(datetime.now(self.KST).strftime('%H%M'))
         buy_cutoff_hm = int(os.getenv("NEW_BUY_CUTOFF_HHMM", "1430") or 1430)
-        buy_start_hm  = int(os.getenv("BUY_START_HHMM", "0930") or 930)  # 장 시작 30분 안정화
+        buy_start_hm  = int(os.getenv("BUY_START_HHMM", "0900") or 900)  # 장 시작부터 v4.3 필터로 감시
         logger.info(
             f"[{now_str}] 🔍 매수후보 {len(watch_set)}개 | 보유 {len(holdings)}개 모니터링"
         )
 
         try:
-            results = self.async_client.fetch_all_stocks(all_watch, kospi_set=self.kospi_symbols_set)
+            import time as _t
+            _now = _t.time()
+
+            # ── 일봉 캐시 확인: TTL 내면 KIS API 재호출 생략 ──────────────────
+            stale_syms = [s for s in all_watch
+                          if _now - self._ohlcv_cache.get(s, (None, 0))[1] > self._ohlcv_cache_ttl]
+            if stale_syms:
+                fresh = self.async_client.fetch_all_stocks(stale_syms, kospi_set=self.kospi_symbols_set)
+                for r in fresh:
+                    if r.get('data'):
+                        self._ohlcv_cache[r['symbol']] = (r['data'], _now)
+                cached_miss = len(all_watch) - len(stale_syms)
+                logger.info(f"  📦 일봉 캐시: {cached_miss}개 재사용 / {len(stale_syms)}개 갱신")
+            else:
+                logger.info(f"  📦 일봉 캐시: {len(all_watch)}개 전체 재사용 (TTL {self._ohlcv_cache_ttl}s)")
+            results = [{'symbol': s, 'name': s, 'data': self._ohlcv_cache.get(s, (None, 0))[0], 'error': None}
+                       for s in all_watch]
 
             # 보유 종목은 KIS API 개별 조회로 지표 교체 (yfinance 데이터 오래됨)
             kis_data: dict = {}
             for sym in holdings:
-                try:
-                    d = self.kis_client.get_daily_ohlcv(sym)
-                    if d:
-                        kis_data[sym] = d
-                except Exception:
-                    pass
+                cached_ts = self._ohlcv_cache.get(sym, (None, 0))[1]
+                if _now - cached_ts > self._ohlcv_cache_ttl:
+                    try:
+                        d = self.kis_client.get_daily_ohlcv(sym)
+                        if d:
+                            kis_data[sym] = d
+                            self._ohlcv_cache[sym] = (d, _now)
+                    except Exception:
+                        pass
+                else:
+                    cached_d = self._ohlcv_cache.get(sym, (None, 0))[0]
+                    if cached_d:
+                        kis_data[sym] = cached_d
             if kis_data:
                 logger.info(f"  📡 보유종목 KIS 지표 갱신: {len(kis_data)}/{len(holdings)}개")
 
-            # 현재가 KIS API 실시간 조회
+            # 현재가 KIS API 실시간 조회 (매 사이클마다 실시간 조회)
             live_prices = self.kis_client.get_current_prices(all_watch)
             if live_prices:
                 logger.info(f"  📡 실시간 현재가 수신: {len(live_prices)}/{len(all_watch)}개")
@@ -1633,13 +2095,35 @@ class KospiTopTenSystem:
                     high_p = max(high_p, cur_price)
                     max_profit = ((high_p - buy_price) / buy_price * 100) if buy_price else 0
 
-                    # ── VB 포지션 전용 조기 청산 (14:50 강제 + 손절) ────────
+                    # 브레이크이븐 스톱: 수익 임계값 달성 시 손절선을 매수가+버퍼로 상향
+                    if buy_price > 0 and holding.get('source') != 'vb':
+                        _be_thresh = float(os.getenv("BREAKEVEN_THRESHOLD_PCT", "3.0") or 3.0)
+                        _be_buf    = float(os.getenv("BREAKEVEN_BUFFER_PCT",    "0.3") or 0.3)
+                        if profit >= _be_thresh:
+                            _be_stop = buy_price * (1 + _be_buf / 100)
+                            _cur_stop = float(holding.get('stop_loss', 0) or 0)
+                            if _be_stop > _cur_stop + 1:
+                                self.position_mgr.update_position_metadata(sym, stop_loss=_be_stop)
+                                logger.info(
+                                    f"  🛡️ [{sym}] 브레이크이븐 스톱: ₩{_be_stop:,.0f} "
+                                    f"(수익 {profit:.1f}% → 매수가+{_be_buf:.1f}%)"
+                                )
+
+                    # ── VB 포지션 전용 조기 청산 (14:50 분할 + 손절) ────────
                     if holding.get('source') == 'vb':
                         vb_eod_hm   = int(os.getenv("VB_EOD_CLOSE_HHMM", "1450") or 1450)
                         vb_stop_price = float(holding.get('vb_stop_price', 0) or 0)
                         if now_hm >= vb_eod_hm:
-                            sell_queue.append((sym, holding_qty, cur_price,
-                                f"VB당일청산({now_hm//100:02d}:{now_hm%100:02d})", None))
+                            if now_hm < 1500 and sym not in self.vb_split_sold:
+                                # 1차: 14:50~14:59 절반 매도 (ceil → 1주도 안전하게 처리)
+                                sell_qty = math.ceil(holding_qty / 2)
+                                sell_queue.append((sym, sell_qty, cur_price,
+                                    f"VB분할1차({now_hm//100:02d}:{now_hm%100:02d})", None))
+                                self.vb_split_sold.add(sym)
+                            elif now_hm >= 1500 and holding_qty > 0:
+                                # 2차: 15:00+ 잔량 전량 청산 (0주 방어)
+                                sell_queue.append((sym, holding_qty, cur_price,
+                                    f"VB분할2차({now_hm//100:02d}:{now_hm%100:02d})", None))
                             continue
                         if vb_stop_price > 0 and cur_price <= vb_stop_price:
                             sell_queue.append((sym, holding_qty, cur_price,
@@ -1791,7 +2275,9 @@ class KospiTopTenSystem:
                         sell_queue.append((sym, holding_qty, cur_price, reason, None))
                         continue
 
-                    # AI 매도 판단 — 수익 2%~15% 구간에서만 호출 (비용 최적화)
+                    # AI 매도 판단 — 보조 경고 전용 (실제 주문 결정 아님)
+                    # 기계적 매도 조건(손절/트레일링/목표가)이 먼저이고,
+                    # AI는 수익 2~15% 구간에서 판단 근거를 텔레그램으로만 알림
                     if 2.0 <= profit <= 15.0:
                         ai_action, ai_reason = self._ai_sell_judgment(
                             symbol=sym,
@@ -1803,14 +2289,13 @@ class KospiTopTenSystem:
                             effective_profile=effective_profile,
                             price_data=price_data,
                         )
-                        if ai_action == "FULL_SELL":
-                            sell_queue.append((sym, holding_qty, cur_price, f"AI익절:{ai_reason}", None))
-                            continue
-                        elif ai_action == "PARTIAL_SELL" and not partial_done and holding_qty > 1:
-                            p_qty = max(1, int(holding_qty * 0.5))
-                            if p_qty < holding_qty:
-                                sell_queue.append((sym, p_qty, cur_price, f"AI부분익절:{ai_reason}", None))
-                                continue
+                        if ai_action in ("FULL_SELL", "PARTIAL_SELL"):
+                            logger.info(
+                                f"  🤖 [{sym}] AI 매도 경고 ({ai_action}) — "
+                                f"수익 {profit:.1f}% | {ai_reason} "
+                                f"[보조 참고, 실주문 아님]"
+                            )
+                            pass  # AI 매도 경고 텔레그램 생략 (참고용 알림 제거)
 
                     trend_score = self.exit_analyzer.assess_trend_strength(sym, price_data)
                     should_sell, exit_reason, _ = self.exit_analyzer.calculate_dynamic_take_profit(
@@ -1896,9 +2381,48 @@ class KospiTopTenSystem:
                             )
                             continue
                     strong_market = bool(self._market_condition.get('strong_trend', False))
-                    signal = self.analyzer.detect_signal(sym, price_data, strong_market=strong_market)
+                    selective     = bool(self._market_condition.get('selective_ok', False))
+                    signal, sig_reason = self.analyzer.detect_signal(
+                        sym, price_data,
+                        strong_market=strong_market,
+                        selective=selective,
+                    )
+                    if signal == 'HOLD':
+                        _score_for_log = self.analyzer.calculate_score(sym, price_data)
+                        self._log_rejection(sym, _score_for_log, sig_reason,
+                                            self._market_condition.get('market_mode','?'),
+                                            pool_rank=self.top_10_symbols.index(sym) + 1
+                                            if sym in self.top_10_symbols else 0,
+                                            reject_price=float(price_data.get('close', 0) or 0))
                     if signal == 'BUY':
                         score = self.analyzer.calculate_score(sym, price_data)
+                        # score_norm: 0~100 → 0~1 정규화
+                        # IntegratedSignal 기준과 동일: ≥0.75=STRONG_BUY / ≥0.65=BUY / ≥0.55=WEAK_BUY
+                        score_norm = score / 100.0
+
+                        # 진입 시간대 가중치: 갭 노이즈·유동성 저하 구간에서 최소 점수 상향
+                        _now_hm = int(datetime.now(self.KST).strftime('%H%M'))
+                        _open_noise_end  = int(os.getenv("BUY_OPEN_NOISE_END_HHMM",  "1000") or 1000)
+                        _golden_end      = int(os.getenv("BUY_GOLDEN_END_HHMM",      "1300") or 1300)
+                        _open_noise_score  = float(os.getenv("BUY_OPEN_NOISE_SCORE",  "0.75") or 0.75)
+                        _golden_score      = float(os.getenv("BUY_GOLDEN_SCORE",       "0") or 0)
+                        _late_window_score = float(os.getenv("BUY_LATE_WINDOW_SCORE", "0.70") or 0.70)
+                        if _now_hm < _open_noise_end:
+                            _time_min_score = _open_noise_score
+                            _time_zone = f"갭노이즈({_open_noise_score:.2f})"
+                        elif _now_hm < _golden_end:
+                            _time_min_score = _golden_score
+                            _time_zone = ""
+                        else:
+                            _time_min_score = _late_window_score
+                            _time_zone = f"후반({_late_window_score:.2f})"
+                        if _time_min_score > 0 and score_norm < _time_min_score:
+                            logger.info(
+                                f"  🕐 [{sym}] 시간대 필터 — {_time_zone} 점수 부족 "
+                                f"{score_norm:.2f}<{_time_min_score:.2f}"
+                            )
+                            continue
+
                         # 시장 변동성 필터 — KOSPI 추세 하락 또는 변동성 과열 시 매수 억제
                         mc = self._market_condition
                         if not mc.get('trend_ok') or not mc.get('volatility_ok'):
@@ -1939,9 +2463,59 @@ class KospiTopTenSystem:
                                 )
                             logger.info(f"  ℹ️ [{sym}] 시장 조건 참고: {', '.join(parts)} | 점수 {score:.1f}")
 
+                        # 1분봉 확인: 단기 역전·거래량 소멸 시 진입 보류
+                        min_ok, min_reason = self._buy_minute_confirm(sym, cur_price)
+                        if not min_ok:
+                            logger.info(f"  ⏸️ [{sym}] 1분봉 확인 실패 — {min_reason} (다음 주기 재확인)")
+                            continue
+
+                        # 섹터 분산: 동일 섹터 포지션 상한
+                        _max_same_sector = int(os.getenv("MAX_SAME_SECTOR_POSITIONS", "2") or 2)
+                        _sym_sector = self.sector_monitor.get_sector_name(sym) or ''
+                        if _sym_sector:
+                            _holdings = self.position_mgr.portfolio['holdings']
+                            _same_cnt = sum(
+                                1 for _h in _holdings
+                                if (self.sector_monitor.get_sector_name(_h) or '') == _sym_sector
+                            )
+                            if _same_cnt >= _max_same_sector:
+                                logger.info(
+                                    f"  🔀 [{sym}] 섹터 집중 차단 — "
+                                    f"{_sym_sector} 이미 {_same_cnt}개 보유 (상한 {_max_same_sector}개)"
+                                )
+                                continue
+
                         market_tag = 'KS' if sym in self.kospi_symbols_set else 'KQ'
                         logger.warning(f"⚡ [{sym}/{market_tag}] 🟢 매수 신호! ₩{cur_price:,.0f} | 점수 {score:.1f}")
                         buy_queue.append((sym, cur_price, price_data))
+
+            # ── 1.45단계: 섀도 풀 신호 체크 (풀 비교 — 실거래 없음) ──────────
+            if self.shadow_candidates and now_hm < buy_cutoff_hm:
+                result_map = {r['symbol']: r for r in results}
+                for _rank, _sym in enumerate(self.shadow_candidates, start=len(self.top_10_symbols) + 1):
+                    if _sym in {s for s, _, _ in buy_queue}:
+                        continue
+                    if self.position_mgr.get_holding_quantity(_sym) > 0:
+                        continue
+                    _r = result_map.get(_sym)
+                    if not _r or not _r['data']:
+                        continue
+                    _pd = _r['data']
+                    if _sym in live_prices:
+                        _pd = {**_pd, 'close': live_prices[_sym]}
+                    _sig, _reason = self.analyzer.detect_signal(
+                        _sym, _pd,
+                        strong_market=bool(self._market_condition.get('strong_trend')),
+                        selective=bool(self._market_condition.get('selective_ok')),
+                    )
+                    _sc = self.analyzer.calculate_score(_sym, _pd)
+                    self._log_pool_paper_signal(_sym, _rank, _sc, _sig, _reason,
+                                                self._market_condition.get('market_mode','?'))
+                    if _sig == 'BUY':
+                        logger.info(
+                            f"  🔬 [풀비교] {_sym} (rank {_rank}) — 페이퍼 BUY 신호 "
+                            f"점수{_sc:.1f} (실거래 풀 미포함)"
+                        )
 
             # ── 1.5단계: 폭락 반등 예외 매수 스캔 ──────────────────────────
             self._crash_daily_reset()
@@ -2036,7 +2610,8 @@ class KospiTopTenSystem:
                 logger.warning(f"🛑 [{sym}] ({idx}/{len(sell_queue)}) {reason} 매도")
                 _reason_str = str(reason)
                 _use_market = (
-                    (_eod_market and ("EOD" in _reason_str or "VB당일청산" in _reason_str))
+                    (_eod_market and ("EOD" in _reason_str or "VB당일청산" in _reason_str
+                                      or "VB분할" in _reason_str))
                     or (_sl_market and ("손절" in _reason_str or "SL" in _reason_str or "VB손절" in _reason_str))
                 )
                 with self._order_lock:
@@ -2155,13 +2730,69 @@ class KospiTopTenSystem:
             atr = float(price_data.get('atr') or price * 0.02)
             stop_loss = max(price - atr * 2.0, price * 0.97)
             risk_pct = float(os.getenv("RISK_PER_TRADE", "0.02"))
-            max_position_pct = float(os.getenv("MAX_POSITION_PCT", "0.15"))
+
             signal_score = self.analyzer.calculate_score(symbol, price_data)
-            full_position_score = float(os.getenv("FULL_POSITION_SCORE", "90") or 90)
-            full_position_pct = float(os.getenv("FULL_POSITION_PCT", "0.4") or 0.4)
-            effective_position_pct = (
-                full_position_pct if signal_score >= full_position_score else max_position_pct
-            )
+
+            # ── 3단계 점수 티어 ──────────────────────────────────────────────
+            max_position_pct    = float(os.getenv("MAX_POSITION_PCT",    "0.22"))  # 65-79점
+            mid_position_score  = float(os.getenv("MID_POSITION_SCORE",  "80")  or 80)
+            mid_position_pct    = float(os.getenv("MID_POSITION_PCT",    "0.28") or 0.28)  # 80-89점
+            full_position_score = float(os.getenv("FULL_POSITION_SCORE", "90")  or 90)
+            full_position_pct   = float(os.getenv("FULL_POSITION_PCT",   "0.34") or 0.34)  # 90+점
+            quality_cap_pct     = float(os.getenv("QUALITY_MAX_PCT",     "0.40") or 0.40)  # 절대 상한
+
+            if signal_score >= full_position_score:
+                effective_position_pct = full_position_pct
+            elif signal_score >= mid_position_score:
+                effective_position_pct = mid_position_pct
+            else:
+                effective_position_pct = max_position_pct
+
+            # ── 수급 품질 보너스: 기관/외인 연속 매집 ───────────────────────
+            cbd = price_data.get('consecutive_buy_days', 0)
+            if cbd >= 5:
+                quality_bonus = float(os.getenv("QUALITY_CBD5_BONUS", "0.04") or 0.04)
+            elif cbd >= 3:
+                quality_bonus = float(os.getenv("QUALITY_CBD3_BONUS", "0.02") or 0.02)
+            else:
+                quality_bonus = 0.0
+            if quality_bonus > 0:
+                _prev_pct = effective_position_pct
+                effective_position_pct = min(effective_position_pct + quality_bonus, quality_cap_pct)
+                logger.info(
+                    f"  🏆 [{symbol}] 수급 보너스 +{quality_bonus*100:.0f}%"
+                    f" (연속매집 {cbd}일): {_prev_pct*100:.0f}% → {effective_position_pct*100:.0f}%"
+                )
+
+            # 변동성 기반 포지션 사이징: ATR%가 높을수록 비중 자동 축소
+            # 목표: 포지션 하루 변동폭이 계좌의 POSITION_TARGET_VOL_PCT% 이내
+            atr_pct = (atr / price) * 100 if price > 0 else 2.0
+            target_vol_pct = float(os.getenv("POSITION_TARGET_VOL_PCT", "2.0") or 2.0)
+            min_position_pct = float(os.getenv("POSITION_MIN_PCT", "0.10") or 0.10)
+            vol_adjusted_pct = min(effective_position_pct, target_vol_pct / max(atr_pct, 0.5))
+            vol_adjusted_pct = max(vol_adjusted_pct, min_position_pct)
+            if vol_adjusted_pct < effective_position_pct - 0.005:
+                logger.info(
+                    f"  📐 [{symbol}] 변동성 조정: {effective_position_pct*100:.0f}%"
+                    f" → {vol_adjusted_pct*100:.0f}%"
+                    f" (ATR {atr_pct:.1f}%, 목표 {target_vol_pct:.1f}%)"
+                )
+            effective_position_pct = vol_adjusted_pct
+
+            # 5일 급등 이벤트 프록시: 단기 급등 종목은 뉴스 등 이벤트 반영 가능 → 포지션 축소
+            _close_5d = float(price_data.get('close_5d_ago', price) or price)
+            if _close_5d > 0:
+                _gain_5d = (price - _close_5d) / _close_5d * 100
+                _event_thresh = float(os.getenv("EVENT_PROXY_5D_GAIN_PCT", "12.0") or 12.0)
+                if _gain_5d >= _event_thresh:
+                    _event_ratio = float(os.getenv("EVENT_PROXY_SIZE_RATIO", "0.6") or 0.6)
+                    _prev_pct = effective_position_pct
+                    effective_position_pct = max(effective_position_pct * _event_ratio, min_position_pct)
+                    logger.info(
+                        f"  📰 [{symbol}] 5일 급등({_gain_5d:.1f}%) 이벤트 조정: "
+                        f"{_prev_pct*100:.0f}% → {effective_position_pct*100:.0f}%"
+                    )
+
             # SCALP→SWING 재분류 시 포지션 50% 축소 (변동성 리스크 완화)
             if _is_scalp_reclassified:
                 effective_position_pct *= 0.5
@@ -2176,10 +2807,45 @@ class KospiTopTenSystem:
             # 14:30 이후 늦은 진입 — 포지션 상한을 LATE_BUY_MAX_POSITION_PCT 로 제한
             now_hm = int(datetime.now(self.KST).strftime('%H%M'))
             buy_cutoff_hm = int(os.getenv("NEW_BUY_CUTOFF_HHMM", "1430") or 1430)
-            if now_hm >= buy_cutoff_hm and os.getenv("LATE_BUY_ENABLED", "false").lower() == "true":
+            _late_buy_active = now_hm >= buy_cutoff_hm and os.getenv("LATE_BUY_ENABLED", "false").lower() == "true"
+            if _late_buy_active:
                 late_pos_pct = float(os.getenv("LATE_BUY_MAX_POSITION_PCT", "0.5") or 0.5)
                 effective_position_pct = min(effective_position_pct, late_pos_pct)
                 logger.info(f"  🌙 [{symbol}] 늦은 진입 — 포지션 상한 {late_pos_pct*100:.0f}% 적용")
+
+            # 진입 유형 레이블 결정 (성과 추적용)
+            if crash_mode:
+                entry_type = "CRASH_RECOVERY"
+            elif price_data.get('_v43_strategy'):
+                entry_type = f"V43_{price_data.get('_v43_grade', 'U')}_{price_data.get('_v43_strategy')}"
+            elif _is_scalp_reclassified:
+                entry_type = "SCALP_REDUCED"
+            elif _late_buy_active:
+                entry_type = "LATE_BUY_EXCEPTION"
+            else:
+                entry_type = "NORMAL_SWING"
+
+            if os.getenv("KOSPI_V43_LIVE_FILTER", "true").lower() == "true" and not crash_mode:
+                v43_base_pct = float(os.getenv("V43_BASE_POSITION_PCT", "0.125") or 0.125)
+                v43_mult = float(price_data.get('_v43_size_multiplier', 1.0) or 1.0)
+                _prev_pct = effective_position_pct
+                effective_position_pct = min(v43_base_pct, v43_base_pct * v43_mult)
+                logger.info(
+                    f"  🧭 [{symbol}] v4.3 포지션 적용 "
+                    f"({entry_type}): {_prev_pct*100:.1f}% → {effective_position_pct*100:.1f}%"
+                )
+
+            # 전략 성과 기반 비중 자동 조정
+            _strat_mult = self._get_strategy_multiplier(entry_type)
+            if _strat_mult != 1.0:
+                _prev_pct = effective_position_pct
+                effective_position_pct = min(effective_position_pct * _strat_mult, quality_cap_pct)
+                logger.info(
+                    f"  📊 [{symbol}] 전략성과 비중 조정 "
+                    f"({entry_type} ×{_strat_mult:.2f}): "
+                    f"{_prev_pct*100:.0f}%→{effective_position_pct*100:.0f}%"
+                )
+
             allow_strong_chase = (
                 os.getenv("ALLOW_STRONG_BUY_CHASE", "true").lower() == "true"
             )
@@ -2318,24 +2984,35 @@ class KospiTopTenSystem:
                         f"⚠️ [{symbol}] 체결 미확인 → {self.BUY_FAIL_COOLDOWN_SEC // 60}분 재시도 차단"
                     )
                     return
-                self.position_mgr.add_position(symbol, quantity, expected_order_price, source='strategy')
+                self.position_mgr.add_position(symbol, quantity, expected_order_price, source='strategy', entry_type=entry_type)
                 profile, profile_reason = self._classify_trade_profile(symbol, price_data, signal_score)
                 if _is_scalp_reclassified and profile == "SCALP":
                     profile_reason = f"[당일청산] {profile_reason}"
                 target_plan = self._build_target_plan(expected_order_price, atr, profile)
+                mc = self._market_condition
+                market_phase = mc.get('market_mode', 'UNKNOWN')
+                entry_ts = datetime.now(self.KST).isoformat()
                 self.position_mgr.update_position_metadata(
                     symbol,
                     strategy_profile=profile,
                     strategy_profile_reason=profile_reason,
-                    strategy_profile_time=datetime.now(self.KST).isoformat(),
+                    strategy_profile_time=entry_ts,
                     effective_profile=profile,
                     effective_profile_reason="진입 프로필",
-                    effective_profile_time=datetime.now(self.KST).isoformat(),
+                    effective_profile_time=entry_ts,
                     target_plan=target_plan,
                     target_stage_events={},
-                    target_plan_time=datetime.now(self.KST).isoformat(),
+                    target_plan_time=entry_ts,
                     last_target_action="진입 직후 목표가 설정",
+                    entry_type=entry_type,
+                    entry_score=round(signal_score, 1),
+                    entry_market_phase=market_phase,
+                    entry_position_pct=round(effective_position_pct * 100, 1),
+                    entry_time=entry_ts,
                 )
+                self._log_trade_entry(symbol, expected_order_price, quantity,
+                                      entry_type, signal_score, market_phase,
+                                      effective_position_pct)
                 logger.info(f"🧭 [{symbol}] 진입 전략 프로필: {profile} — {profile_reason}")
                 if target_plan:
                     logger.info(
@@ -2355,13 +3032,6 @@ class KospiTopTenSystem:
                         f"🚨 폭락반등 예외매수 ({self._crash_buy_count_today}/"
                         f"{os.getenv('CRASH_MAX_DAILY_BUYS', '2')})"
                     ]
-                    self.reporter.send_message(
-                        f"🚨 폭락반등 예외매수\n"
-                        f"종목: {symbol}\n"
-                        f"수량: {quantity}주 @ ₩{expected_order_price:,.0f}\n"
-                        f"점수: {signal_score:.1f} | 프로필: {profile}\n"
-                        f"당일 폭락매수: {self._crash_buy_count_today}건"
-                    )
                 self._notify_trade(
                     "BUY",
                     symbol,
@@ -2413,16 +3083,13 @@ class KospiTopTenSystem:
                 # 실현 손익 누적 → 서킷브레이커 판단
                 if buy_price_snap > 0:
                     self._update_daily_pnl((price - buy_price_snap) * quantity)
-                remaining_qty = self.position_mgr.get_holding_quantity(symbol)
-                extra_lines = [f"잔여수량: {remaining_qty}주"]
+                self._log_trade_exit(symbol, price, quantity, reason, holding_snap)
+                extra_lines = []
                 if reason:
-                    extra_lines.insert(0, f"사유: {reason}")
-                holding = self.position_mgr.portfolio.get('holdings', {}).get(symbol)
-                if holding:
-                    buy_price = float(holding.get('price', 0) or 0)
-                    if buy_price > 0:
-                        profit_pct = (price - buy_price) / buy_price * 100
-                        extra_lines.append(f"기준수익률: {profit_pct:+.2f}%")
+                    extra_lines.append(f"사유: {reason}")
+                if buy_price_snap > 0:
+                    profit_pct = (price - buy_price_snap) / buy_price_snap * 100
+                    extra_lines.append(f"수익률: {profit_pct:+.2f}%")
                 self._notify_trade("SELL", symbol, quantity, price, extra_lines=extra_lines)
                 return True
             else:
@@ -2433,16 +3100,344 @@ class KospiTopTenSystem:
             logger.error(f"❌ 매도 실패 ({symbol}): {e}")
             return False
 
+    def _calc_strategy_multipliers(self, lookback_days: int = 20) -> dict[str, float]:
+        """
+        trades.jsonl 최근 lookback_days일 EXIT 기록으로 entry_type별 성과 평가,
+        비중 조정 배수(multiplier) 딕셔너리 반환.
+
+        기준:
+          - 데이터 부족 (n < PERF_MIN_TRADES) → 1.0 (중립)
+          - 승률 < 40% AND 평균손익 < -1%  → 0.50 (강한 축소)
+          - 승률 < 50% OR  평균손익 < 0%   → 0.75 (약한 축소)
+          - 승률 ≥ 65% AND 평균손익 ≥ 2%   → 1.10 (성과 보너스)
+          - 나머지 → 1.0
+        """
+        from collections import defaultdict
+        from datetime import timedelta
+
+        min_trades = int(os.getenv("PERF_MIN_TRADES", "10") or 10)
+        result: dict[str, float] = {}
+
+        if not TRADES_LOG.exists():
+            return result
+
+        cutoff = (datetime.now(self.KST) - timedelta(days=lookback_days)).date()
+        perf: dict[str, dict] = defaultdict(lambda: {"wins": 0, "n": 0, "total_pnl": 0.0})
+
+        try:
+            with open(TRADES_LOG, encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        r = json.loads(line)
+                    except Exception:
+                        continue
+                    if r.get("event") != "EXIT":
+                        continue
+                    try:
+                        ts = datetime.fromisoformat(r.get("ts", ""))
+                    except Exception:
+                        continue
+                    if ts.date() < cutoff:
+                        continue
+                    et  = r.get("entry_type", "UNKNOWN")
+                    pnl = float(r.get("profit_pct", 0))
+                    perf[et]["n"]         += 1
+                    perf[et]["total_pnl"] += pnl
+                    if pnl > 0:
+                        perf[et]["wins"] += 1
+        except Exception as e:
+            logger.warning(f"⚠️ 전략 비중 배수 산출 오류: {e}")
+            return result
+
+        for et, v in perf.items():
+            n = v["n"]
+            if n < min_trades:
+                result[et] = 1.0
+                continue
+            win_rate = v["wins"] / n
+            avg_pnl  = v["total_pnl"] / n
+            if win_rate < 0.40 and avg_pnl < -1.0:
+                mult = 0.50
+            elif win_rate < 0.50 or avg_pnl < 0.0:
+                mult = 0.75
+            elif win_rate >= 0.65 and avg_pnl >= 2.0:
+                mult = 1.10
+            else:
+                mult = 1.0
+            result[et] = mult
+
+        if result:
+            adjusted = {et: m for et, m in result.items() if m != 1.0}
+            if adjusted:
+                logger.info(
+                    f"📊 전략 비중 배수 산출 완료 (최근 {lookback_days}일): "
+                    + ", ".join(f"{et}×{m:.2f}" for et, m in adjusted.items())
+                )
+        return result
+
+    def _get_strategy_multiplier(self, entry_type: str) -> float:
+        """entry_type 에 해당하는 비중 조정 배수 반환 (일 1회 갱신 캐시)."""
+        now_ts = time.time()
+        # 하루에 한 번만 재산출 (86400초)
+        if now_ts - self._strategy_multipliers_ts > 86400 or not self._strategy_multipliers:
+            self._strategy_multipliers    = self._calc_strategy_multipliers()
+            self._strategy_multipliers_ts = now_ts
+        return self._strategy_multipliers.get(entry_type, 1.0)
+
+    def _rolling_performance_report(self, days: int) -> str | None:
+        """
+        trades.jsonl 에서 최근 days일 EXIT 기록을 집계해 성과 문자열 반환.
+        체결 없으면 None 반환.
+        """
+        from collections import defaultdict
+        from datetime import timedelta
+
+        if not TRADES_LOG.exists():
+            return None
+
+        cutoff = (datetime.now(self.KST) - timedelta(days=days)).date()
+
+        perf: dict[str, dict] = defaultdict(lambda: {
+            "wins": 0, "losses": 0, "total_pnl": 0.0,
+            "hold_sec": 0, "count": 0, "max_loss": 0.0,
+        })
+        sell_type_counts: dict[str, int] = defaultdict(int)
+        day_set: set[str] = set()
+
+        try:
+            with open(TRADES_LOG, encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        r = json.loads(line)
+                    except Exception:
+                        continue
+                    if r.get("event") != "EXIT":
+                        continue
+                    ts_str = r.get("ts", "")
+                    try:
+                        ts = datetime.fromisoformat(ts_str)
+                    except Exception:
+                        continue
+                    if ts.date() < cutoff:
+                        continue
+                    day_set.add(ts.strftime('%Y-%m-%d'))
+                    et  = r.get("entry_type", "UNKNOWN")
+                    st  = r.get("sell_type", "OTHER")
+                    pnl = float(r.get("profit_pct", 0))
+                    hs  = int(r.get("hold_sec", 0))
+                    perf[et]["count"]     += 1
+                    perf[et]["total_pnl"] += pnl
+                    perf[et]["hold_sec"]  += hs
+                    if pnl > 0:
+                        perf[et]["wins"] += 1
+                    else:
+                        perf[et]["losses"] += 1
+                    if pnl < perf[et]["max_loss"]:
+                        perf[et]["max_loss"] = pnl
+                    sell_type_counts[st] += 1
+        except Exception as e:
+            logger.warning(f"⚠️ 롤링 성과 집계 오류: {e}")
+            return None
+
+        total = sum(v["count"] for v in perf.values())
+        if total == 0:
+            return None
+
+        total_wins = sum(v["wins"]      for v in perf.values())
+        total_pnl  = sum(v["total_pnl"] for v in perf.values())
+        overall_wr = total_wins / total * 100 if total else 0
+        avg_pnl    = total_pnl  / total       if total else 0
+        today_str  = datetime.now(self.KST).strftime('%Y-%m-%d')
+
+        lines = [f"📊 {days}일 롤링 성과 (~{today_str}, {len(day_set)}거래일)"]
+        lines.append(f"총 {total}건 | 전체 승률 {overall_wr:.0f}% | 평균 {avg_pnl:+.2f}%\n")
+
+        lines.append("[ 전략(entry_type)별 ]")
+        for et, v in sorted(perf.items(), key=lambda x: x[1]["count"], reverse=True):
+            n    = v["count"]
+            wr   = v["wins"] / n * 100 if n else 0
+            avg  = v["total_pnl"] / n  if n else 0
+            ml   = v["max_loss"]
+            avgh = v["hold_sec"] // n // 60 if n else 0
+            lines.append(
+                f"  {et}: {n}건 | 승률{wr:.0f}% | 평균{avg:+.2f}% | "
+                f"최대손실{ml:.1f}% | 평균보유{avgh}분"
+            )
+
+        lines.append("\n[ 매도 유형별 ]")
+        for st, cnt in sorted(sell_type_counts.items(), key=lambda x: x[1], reverse=True):
+            lines.append(f"  {st}: {cnt}건")
+
+        return "\n".join(lines)
+
+    def _send_rolling_report(self, days: int) -> None:
+        """롤링 성과 리포트를 로그 + 텔레그램으로 전송."""
+        try:
+            msg = self._rolling_performance_report(days)
+            if not msg:
+                logger.info(f"📊 {days}일 롤링 — 체결 기록 없음, 생략")
+                return
+            logger.info(msg)
+            try:
+                self.reporter.send_message(msg)
+            except Exception as e:
+                logger.debug(f"롤링 성과 텔레그램 실패: {e}")
+        except Exception as e:
+            logger.warning(f"⚠️ {days}일 롤링 성과 리포트 오류: {e}")
+
+    def _shadow_performance_report(self) -> str | None:
+        """
+        오늘 탈락(REJECTION) 종목의 장마감 현재가를 조회해
+        '탈락 후 실제 등락'을 기록·요약한다.
+
+        - rejections.jsonl 에서 오늘 날짜 기록만 추출
+        - 종목별 첫 탈락 기록만 사용 (당일 중복 제거)
+        - reject_price 가 없는 레코드는 스킵
+        - 장마감 현재가 조회 후 SHADOW_RESULT 레코드를 shadow_perf.jsonl 에 기록
+        - 요약 문자열 반환 (None = 데이터 없음)
+        """
+        try:
+            if not REJECTIONS_LOG.exists():
+                return None
+            today = datetime.now(self.KST).strftime('%Y-%m-%d')
+
+            # 종목별 첫 탈락 레코드만 수집
+            first_reject: dict[str, dict] = {}
+            with open(REJECTIONS_LOG, encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        r = json.loads(line)
+                    except Exception:
+                        continue
+                    if not r.get("ts", "").startswith(today):
+                        continue
+                    sym = r.get("symbol", "")
+                    rp  = float(r.get("reject_price", 0) or 0)
+                    if not sym or rp <= 0:
+                        continue
+                    if sym not in first_reject:
+                        first_reject[sym] = r
+
+            if not first_reject:
+                return None
+
+            # 장마감 현재가 일괄 조회
+            syms = list(first_reject.keys())
+            try:
+                close_prices = self.kis_client.get_current_prices(syms)
+            except Exception as e:
+                logger.warning(f"⚠️ 섀도 성과 현재가 조회 실패: {e}")
+                close_prices = {}
+
+            results: list[dict] = []
+            for sym, rec in first_reject.items():
+                rp = float(rec["reject_price"])
+                cp = float(close_prices.get(sym, 0) or 0)
+                if cp <= 0:
+                    continue
+                chg = (cp - rp) / rp * 100
+                result = {
+                    "event":        "SHADOW_RESULT",
+                    "ts":           datetime.now(self.KST).isoformat(),
+                    "date":         today,
+                    "symbol":       sym,
+                    "score":        rec.get("score", 0),
+                    "reasons":      rec.get("reasons", ""),
+                    "market_phase": rec.get("market_phase", ""),
+                    "reject_price": rp,
+                    "close_price":  cp,
+                    "chg_pct":      round(chg, 2),
+                    "would_profit": chg > 0,
+                }
+                results.append(result)
+
+            if not results:
+                return None
+
+            # shadow_perf.jsonl 에 기록
+            try:
+                with open(SHADOW_PERF_LOG, "a", encoding="utf-8") as f:
+                    for r in results:
+                        f.write(json.dumps(r, ensure_ascii=False) + "\n")
+            except Exception as e:
+                logger.warning(f"⚠️ 섀도 성과 기록 실패: {e}")
+
+            # 요약 생성
+            up   = [r for r in results if r["would_profit"]]
+            down = [r for r in results if not r["would_profit"]]
+            precision = len(down) / len(results) * 100  # 탈락이 실제로 맞은 비율
+
+            lines = [f"🔍 섀도 성과 [{today}] — 탈락 {len(results)}종목"]
+            lines.append(
+                f"탈락 후 하락: {len(down)}건 / 상승: {len(up)}건 "
+                f"| 필터 정확도 {precision:.0f}%\n"
+            )
+
+            # 놓친 상승 (탈락했지만 올라간 종목)
+            if up:
+                lines.append("[ 놓친 상승 — 재검토 대상 ]")
+                for r in sorted(up, key=lambda x: x["chg_pct"], reverse=True)[:5]:
+                    lines.append(
+                        f"  {r['symbol']} +{r['chg_pct']:.1f}%"
+                        f"  점수{r['score']}  {r['reasons']}"
+                    )
+
+            # 잘 막은 하락 (탈락이 맞은 종목 Top5)
+            if down:
+                lines.append("\n[ 올바른 탈락 — Top5 ]")
+                for r in sorted(down, key=lambda x: x["chg_pct"])[:5]:
+                    lines.append(
+                        f"  {r['symbol']} {r['chg_pct']:.1f}%"
+                        f"  점수{r['score']}  {r['reasons']}"
+                    )
+
+            return "\n".join(lines)
+
+        except Exception as e:
+            logger.warning(f"⚠️ 섀도 성과 리포트 오류: {e}")
+            return None
+
     # ── 장 마감 ────────────────────────────────────────────────────────────
 
     def stop_monitoring(self):
         self.is_market_open = False
         self.last_rescreen_time = 0.0   # 다음 날 재선정을 위해 초기화
+        now = datetime.now(self.KST)
         logger.info("=" * 70)
-        logger.info(f"🌙 장 마감 — {datetime.now(self.KST).strftime('%H:%M:%S')}")
+        logger.info(f"🌙 장 마감 — {now.strftime('%H:%M:%S')}")
         logger.info("   내일 08:30 스크리닝까지 대기")
         logger.info("=" * 70)
         self.show_balance()
+        self._daily_performance_report()
+
+        # 섀도 성과: 매일 전송
+        try:
+            shadow_msg = self._shadow_performance_report()
+            if shadow_msg:
+                logger.info(shadow_msg)
+                try:
+                    self.reporter.send_message(shadow_msg)
+                except Exception:
+                    pass
+        except Exception as e:
+            logger.warning(f"⚠️ 섀도 성과 리포트 실패: {e}")
+
+        # 금요일: 7일 롤링
+        if now.weekday() == 4:
+            self._send_rolling_report(7)
+
+        # 월말(25일 이후 목/금): 20일 롤링
+        if now.day >= 25 and now.weekday() >= 3:
+            self._send_rolling_report(20)
 
     # ── 스케줄 설정 ────────────────────────────────────────────────────────
 
@@ -2503,22 +3498,68 @@ class KospiTopTenSystem:
             "\n📅 스케줄 (PID %d)\n"
             "   08:00 KST — KIS 토큰 선제 갱신\n"
             "   08:30 KST — 코스피 전체 + 코스닥 상위 300 스캔\n"
-            "   09:00~14:30 — 5분마다 재선정+모니터링 / 30초마다 손절·트레일링\n"
+            "   09:00~14:30 — 1분마다 재선정+모니터링 (일봉 5분 캐시) / 30초마다 손절·트레일링\n"
             "   14:30~15:30 — 모니터링만 (재선정 스킵)\n"
             "   15:30 KST — 마감", os.getpid()
         )
         schedule.every().day.at("08:00").do(self._refresh_tokens_scheduled)
         schedule.every().day.at("08:30").do(self.morning_screening)
         schedule.every(30).seconds.do(self._holdings_gate)  # 보유 종목 손절/트레일링 빠른 체크
-        schedule.every(5).minutes.do(self._intraday_gate)   # 매수 스캔 + 전체 모니터링
+        _mon_interval = int(os.getenv("MONITOR_INTERVAL_SEC", "60"))
+        schedule.every(_mon_interval).seconds.do(self._intraday_gate)  # 매수 스캔 + 전체 모니터링
         schedule.every().day.at("15:30").do(self.stop_monitoring)
 
-        # 장중 재시작 시 섹터풀 즉시 구성 (아침 스캔 없이 시작된 경우)
+        # 장중 재시작 시 후보 복원 또는 전체 스캔
         now = datetime.now(self.KST)
         hm  = now.hour * 100 + now.minute
-        if now.weekday() < 5 and 900 <= hm < 1530 and not self.rescan_pool:
-            logger.info("🔄 장중 재시작 감지 — 섹터풀 즉시 구성을 위해 아침 스크리닝 실행")
-            threading.Thread(target=self.morning_screening, daemon=True).start()
+        if now.weekday() < 5 and 900 <= hm < 1530:
+            if self.top_10_symbols and self.rescan_pool:
+                logger.info(
+                    f"📂 장중 재시작 — 후보 {len(self.top_10_symbols)}개 + 재선정풀 {len(self.rescan_pool)}개 복원 "
+                    f"(전체 스캔 생략, 다음 재선정 주기에 자동 갱신)"
+                )
+                self._update_market_condition()
+                self.sector_monitor.update(force=True)
+                self.is_market_open = True
+            else:
+                logger.info("🔄 장중 재시작 감지 — 아침 스크리닝 실행")
+                threading.Thread(target=self.morning_screening, daemon=True).start()
+
+    def _validate_opening_candidates(self) -> None:
+        """09:05 1회 실행: 장 초반 5분 실거래 거래대금으로 watchlist 유동성 재검증."""
+        if not self.top_10_symbols:
+            self._opening_validated = True
+            return
+        min_turnover = float(os.getenv("OPENING_MIN_TURNOVER", "100000000") or 100_000_000)  # 기본 1억
+        try:
+            live_prices = self.kis_client.get_current_prices(self.top_10_symbols) or {}
+        except Exception:
+            live_prices = {}
+        remove_list = []
+        for sym in list(self.top_10_symbols):
+            cur_price = live_prices.get(sym, 0)
+            if cur_price <= 0:
+                continue
+            try:
+                min_df = self.kis_client.get_intraday_ohlcv(sym, interval='1m', lookback=5)
+                # 5분봉이 모두 쌓인 것을 확인 (데이터 서버 지연 방어)
+                if min_df is None or len(min_df) < 5:
+                    continue
+                opening_vol = float(min_df['volume'].sum()) if 'volume' in min_df.columns else 0
+                opening_turnover = opening_vol * cur_price
+                if 0 < opening_turnover < min_turnover:
+                    remove_list.append(sym)
+                    logger.info(
+                        f"  🌅 [{sym}] 개장 유동성 부족 — watchlist 제거 "
+                        f"(5분 거래대금 ₩{opening_turnover/1e8:.1f}억 < {min_turnover/1e8:.0f}억)"
+                    )
+            except Exception:
+                continue
+        for sym in remove_list:
+            if sym in self.top_10_symbols:
+                self.top_10_symbols.remove(sym)
+        self._opening_validated = True
+        logger.info(f"🌅 개장 검증 완료: {len(remove_list)}개 제거, watchlist {len(self.top_10_symbols)}개 유지")
 
     def _intraday_gate(self):
         now = datetime.now(self.KST)
@@ -2529,6 +3570,11 @@ class KospiTopTenSystem:
             return
 
         buy_cutoff_hm = int(os.getenv("NEW_BUY_CUTOFF_HHMM", "1430") or 1430)
+
+        # 09:07~09:29: 장 초반 1회 개장 유동성 검증 (09:05 API 지연 방어 → 09:07 기본값)
+        opening_validate_hm = int(os.getenv("OPENING_VALIDATE_HHMM", "907") or 907)
+        if opening_validate_hm <= hm < 930 and not self._opening_validated:
+            self._validate_opening_candidates()
 
         # 매수 컷오프 이후(14:30~)는 보유 종목 있을 때만 감시
         if hm >= buy_cutoff_hm:

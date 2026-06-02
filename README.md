@@ -15,29 +15,6 @@
 
 ## 설치 방법
 
-### 방법 1. Windows EXE 간편 설치 (Python 불필요)
-
-1. [Releases](https://github.com/hoisungko-dotcom/kospi_trading/releases/latest) 페이지에서 두 파일 다운로드
-   - `KOSPI_AutoTrade.exe`
-   - `env.example`
-2. 두 파일을 **같은 폴더**에 저장
-3. `env.example` 파일을 `.env` 로 이름 변경
-
-   **명령 프롬프트(cmd):**
-   ```
-   rename env.example .env
-   ```
-   또는 탐색기에서 `env.example` 우클릭 → 이름 바꾸기 → `.env` 입력
-
-4. `.env` 를 메모장(또는 텍스트 편집기)으로 열어 KIS API 키 입력
-5. `KOSPI_AutoTrade.exe` 실행
-
-> 실행 후 같은 폴더에 `logs/`, `data/` 폴더가 자동 생성됩니다.
-
----
-
-### 방법 2. Python 소스코드 설치
-
 ### 1. Python 설치
 
 Python 3.11 이상이 필요합니다.  
@@ -144,17 +121,6 @@ AI가 수익 구간에서 매도 여부를 판단합니다. 없어도 기본 지
    TELEGRAM_TOKEN=발급받은_토큰
    TELEGRAM_CHAT_ID=본인_채팅_ID
    ```
-
----
-
-## 실행 환경 요구사항
-
-- **PC가 켜져 있어야 합니다** — 절전/종료 시 매매가 중단됩니다
-- **인터넷 연결 유지** — KIS API 통신이 끊기면 주문 불가합니다
-- **장 시작 전(08:30 이전) 실행** 권장 — 이후 실행 시 당일 종목 스캔을 건너뜁니다
-
-> 프로그램 실행 중에는 Windows 절전 모드가 자동으로 차단됩니다.  
-> 종료 시 절전 설정이 자동으로 복원됩니다.
 
 ---
 

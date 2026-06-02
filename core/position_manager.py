@@ -1,17 +1,13 @@
 import os
 import json
 import logging
-import sys
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict
 
 logger = logging.getLogger(__name__)
 
-if getattr(sys, 'frozen', False):
-    PORTFOLIO_DIR = Path(sys.executable).parent / "paper_trading_logs"
-else:
-    PORTFOLIO_DIR = Path(__file__).parent.parent / "paper_trading_logs"
+PORTFOLIO_DIR = Path(__file__).parent.parent / "paper_trading_logs"
 
 
 class PositionManager:
@@ -104,7 +100,8 @@ class PositionManager:
 
     # ── 포지션 조작 ───────────────────────────────────────────────────────
 
-    def add_position(self, symbol: str, quantity: int, price: float, source: str = 'strategy') -> bool:
+    def add_position(self, symbol: str, quantity: int, price: float,
+                     source: str = 'strategy', entry_type: str = '') -> bool:
         """매수 체결 후 포지션 추가. 현금 부족 시 False 반환."""
         cost = quantity * price
         if self.portfolio['cash'] < cost:
@@ -128,6 +125,8 @@ class PositionManager:
         h[symbol]['amount']        = new_amt
         h[symbol]['highest_price'] = max(h[symbol].get('highest_price', 0), price)
         h[symbol]['source']        = source
+        if entry_type:
+            h[symbol]['entry_type'] = entry_type
         self.portfolio['cash'] -= cost
 
         logger.info(
@@ -225,9 +224,17 @@ class PositionManager:
                 'effective_profile',
                 'effective_profile_reason',
                 'effective_profile_time',
+                'entry_type',
+                'entry_time',
+                'entry_score',
+                'entry_market_phase',
+                'entry_position_pct',
             ):
                 if key in existing:
                     normalized[key] = existing[key]
+            # entry_type이 없으면 RESTORED로 표기 (재시작 복원 포지션)
+            if not normalized.get('entry_type'):
+                normalized['entry_type'] = 'RESTORED'
             normalized_holdings[sym] = normalized
 
         self.portfolio['holdings'] = normalized_holdings

@@ -26,7 +26,15 @@ class KISClientKospi:
         self._market_data = MarketDataKOSPI(self._client)
         self._executor = OrderExecution(self._client)
         self.is_mock = os.getenv("MOCK_TRADING", "true").lower() == "true"
+        self._last_api_call_t = 0.0
+        self._api_min_interval = float(os.getenv("KIS_SERIAL_API_MIN_INTERVAL", "0.35") or 0.35)
         logger.info(f"✅ KISClientKospi 초기화 완료 ({'모의' if self.is_mock else '실전'}투자)")
+
+    def _api_wait(self, label: str = "") -> None:
+        elapsed = time.time() - self._last_api_call_t
+        if elapsed < self._api_min_interval:
+            time.sleep(self._api_min_interval - elapsed)
+        self._last_api_call_t = time.time()
 
     # ── OHLCV + 지표 ─────────────────────────────────────────────────────
 
@@ -105,6 +113,7 @@ class KISClientKospi:
                 'bb_upper':         s(bb_upper,     default=s(close)),
                 'bb_middle':        s(bb_mid,       default=s(close)),
                 'close_5d_ago':     s(close, -5,    default=s(close)),
+                'close_20d_ago':    s(close, -20,   default=s(close)),
                 'high_20d':         float(high.tail(20).max()),
                 'low_52w':          float(low.tail(252).min()),
                 'atr':              s(atr,          default=s(close) * 0.02),
@@ -154,6 +163,7 @@ class KISClientKospi:
         import time as _time
         prices: dict[str, float] = {}
         for sym in symbols:
+            self._api_wait("current_price")
             price = self._market_data.get_current_price(sym)
             if price:
                 prices[sym] = price
@@ -167,10 +177,76 @@ class KISClientKospi:
 
     def get_intraday_ohlcv(self, symbol: str, interval: str = '1m', lookback: int = 30):
         """단일 종목 분봉 데이터. 실패 시 None."""
+        self._api_wait("intraday")
         return self._market_data.get_kospi_ohlcv(symbol, interval=interval, lookback=lookback)
+
+    def get_foreign_net_buying(self, symbol: str, lookback: int = 5) -> list[dict]:
+        """종목별 외국계 순매수추이 (FHKST644400C0).
+        반환: [{'date': 'YYYYMMDD', 'foreigner_net': float, 'net_flow': float}, ...]
+              최신 데이터가 마지막 인덱스. 실패 시 빈 리스트.
+        """
+        import requests
+        try:
+            client = self._client
+            url = f"{client.data_base_url}/uapi/domestic-stock/v1/quotations/frgnmem-pchs-trend"
+            params = {
+                "FID_INPUT_ISCD":        symbol,
+                "FID_INPUT_ISCD_2":      "99999",  # 외국계 전체
+                "FID_COND_MRKT_DIV_CODE": "J",
+            }
+            for attempt in range(2):
+                self._api_wait("foreign_flow")
+                headers = {
+                    "content-type":  "application/json; charset=utf-8",
+                    "authorization": f"Bearer {client.data_token}",
+                    "appkey":        client.data_appkey,
+                    "appsecret":     client.data_appsecret,
+                    "tr_id":         "FHKST644400C0",
+                    "custtype":      "P",
+                }
+                resp   = requests.get(url, headers=headers, params=params, timeout=8)
+                result = resp.json()
+                if result.get('rt_cd') == '0':
+                    break
+                if result.get('msg_cd') == 'EGW00123' and attempt == 0:
+                    client._delete_cached_token(client.data_appkey)
+                    client.data_token = client._get_token(
+                        client.data_base_url, client.data_appkey, client.data_appsecret
+                    )
+                    continue
+                logger.debug(f"외국계 순매수 조회 실패 ({symbol}): {result.get('msg1', '')}")
+                return []
+
+            rows = result.get('output') or result.get('output1') or []
+            flow = []
+            for row in rows[:lookback]:
+                # KIS 응답 필드명 다중 시도
+                net = (
+                    row.get('frgn_ntby_qty')
+                    or row.get('frgn_net_buy')
+                    or row.get('ntby_qty')
+                    or row.get('frgn_shnu_qty', 0)
+                )
+                try:
+                    net = float(str(net).replace(',', ''))
+                except Exception:
+                    net = 0.0
+                flow.append({
+                    'date':          row.get('stck_bsop_date', ''),
+                    'foreigner_net': net,
+                    'institution_net': 0,
+                    'net_flow':      net,
+                })
+            # 오래된 날짜 → 최신 순으로 정렬 ([-1]이 최신)
+            flow.sort(key=lambda x: x.get('date', ''))
+            return flow
+        except Exception as e:
+            logger.debug(f"외국계 순매수 조회 예외 ({symbol}): {e}")
+            return []
 
     def get_orderable_cash(self, symbol: str, price: float, use_max: bool = False) -> float:
         """KIS API에서 실제 주문가능금액 조회 (당일 매도 재사용 포함 최대 매수가능금액)"""
+        self._api_wait("orderable_cash")
         return self._client.get_orderable_cash(symbol=symbol, price=int(price), use_max=use_max)
 
     def verify_domestic_fill(
@@ -234,17 +310,18 @@ class KISClientKospi:
         실패 시 빈 dict 반환.
         """
         try:
+            self._api_wait("balance")
             res = self._client.get_kr_balance()
             if not res or res.get('rt_cd') != '0':
                 logger.warning(f"⚠️ 잔고 조회 응답 이상: {res}")
                 return {}
 
-            # 최대 매수가능금액 (당일 매도 재사용 포함) — KIS 앱 표시 잔고와 동일
+            # 예수금(dnca_tot_amt) = KIS 앱 실제 잔고와 동일한 값
+            # 주문가능금액(max_buy_amt)은 주문 직전에 get_orderable_cash()로 별도 조회
             output2 = res.get('output2', {})
             if isinstance(output2, list):
                 output2 = output2[0] if output2 else {}
-            max_cash = self._client.get_orderable_cash(symbol="", price=0, use_max=True)
-            cash = max_cash if max_cash > 0 else float(output2.get('dnca_tot_amt', 0) or 0)
+            cash = float(output2.get('dnca_tot_amt', 0) or 0)
 
             # 보유종목
             holdings = {}

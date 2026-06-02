@@ -7,7 +7,7 @@ from urllib import request
 logger = logging.getLogger(__name__)
 
 _CACHE: dict = {}
-_TTL = {'vix': 1800, 'fear_greed': 3600, 'news': 900}
+_TTL = {'vix': 1800, 'fear_greed': 3600}
 
 
 def _cached(key: str, fetch_fn):
@@ -48,24 +48,10 @@ def get_fear_greed() -> dict | None:
     return _cached('fear_greed', _fetch)
 
 
-def get_news() -> list[str]:
-    def _fetch():
-        req = request.Request(
-            "https://www.mk.co.kr/rss/30000001/",
-            headers={"User-Agent": "Mozilla/5.0"},
-        )
-        with request.urlopen(req, timeout=8) as resp:
-            root = ET.fromstring(resp.read())
-            return [
-                item.findtext('title', '').strip()
-                for item in root.findall('.//item')[:5]
-                if item.findtext('title')
-            ]
-    return _cached('news', _fetch) or []
 
 
 def get_summary() -> dict:
-    return {'vix': get_vix(), 'fear_greed': get_fear_greed(), 'news': get_news()}
+    return {'vix': get_vix(), 'fear_greed': get_fear_greed()}
 
 
 def format_log(summary: dict) -> str:
