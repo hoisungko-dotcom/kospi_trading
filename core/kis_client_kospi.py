@@ -257,7 +257,7 @@ class KISClientKospi:
         order_qty: int,
         retries: int | None = None,
         delay_sec: float | None = None,
-    ) -> bool:
+    ) -> bool | str:
         """주문 전송 후 실제 잔고 수량 변화로 체결 여부를 확인한다.
 
         KIS 주문 API의 성공 응답은 주문 접수 성공이지 체결 확정이 아닐 수 있다.
@@ -268,10 +268,18 @@ class KISClientKospi:
         side = side.upper()
         expected_buy_qty = previous_qty + order_qty
         expected_sell_qty = max(0, previous_qty - order_qty)
+        balance_failures = 0
 
         for attempt in range(1, retries + 1):
             time.sleep(delay_sec)
             balance = self.get_balance()
+            if not balance:
+                balance_failures += 1
+                logger.warning(
+                    f"⏳ [{symbol}] {side} 체결 확인 보류: 잔고 조회 실패 "
+                    f"(시도 {attempt}/{retries})"
+                )
+                continue
             holdings = balance.get('holdings', {}) if balance else {}
             current_qty = int(holdings.get(symbol, {}).get('quantity', 0) or 0)
 
@@ -293,6 +301,13 @@ class KISClientKospi:
                 f"기대 {'>=' + str(expected_buy_qty) if side == 'BUY' else '<=' + str(expected_sell_qty)}주 "
                 f"(시도 {attempt}/{retries})"
             )
+
+        if balance_failures >= retries:
+            logger.error(
+                f"⚠️ [{symbol}] {side} 체결 확인 불가 — 주문은 접수됐을 수 있으나 "
+                "잔고 조회가 모두 실패했습니다. 재주문하지 않고 보류합니다."
+            )
+            return "PENDING"
 
         logger.error(
             f"❌ [{symbol}] {side} 체결 미확인 — 주문은 접수됐을 수 있으나 "

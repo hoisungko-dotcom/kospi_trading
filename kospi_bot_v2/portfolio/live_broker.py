@@ -34,6 +34,7 @@ class KISLiveBroker:
         self._last_alert_t: float = 0.0
         self._last_sync_t: float = 0.0
         self._sync_min_interval_sec: float = float(os.getenv("V2_BALANCE_SYNC_MIN_INTERVAL_SEC", "90") or 90)
+        self._sell_cooldowns: dict[str, float] = {}
         self.sync(force=True)
 
     def _alert(self, text: str) -> None:
@@ -125,6 +126,14 @@ class KISLiveBroker:
     def buy(self, signal: Signal, quantity: int) -> Trade | None:
         if quantity <= 0 or signal.symbol in self.positions:
             return None
+        cooldown_until = self._sell_cooldowns.get(signal.symbol, 0.0)
+        if cooldown_until > time.time():
+            logger.info(
+                "⏳ %s live buy skipped: broker re-entry cooldown %.0fs left",
+                signal.symbol,
+                cooldown_until - time.time(),
+            )
+            return None
         orderable = self.client.get_orderable_cash(signal.symbol, signal.price, use_max=True)
         if orderable >= 0 and signal.price * quantity > orderable:
             quantity = int((orderable * 0.99) // signal.price)
@@ -142,7 +151,15 @@ class KISLiveBroker:
         if not ok:
             return None
 
-        if not self.client.verify_domestic_fill(signal.symbol, "BUY", previous_qty, quantity):
+        fill_status = self.client.verify_domestic_fill(signal.symbol, "BUY", previous_qty, quantity)
+        if fill_status == "PENDING":
+            logger.warning(
+                "⚠️ %s live buy fill pending: balance unavailable, no local record and no retry",
+                signal.symbol,
+            )
+            self.sync(force=True)
+            return None
+        if not fill_status:
             self.sync(force=True)
             return None
 
@@ -169,7 +186,15 @@ class KISLiveBroker:
         ok = self.client.place_sell_order(symbol, previous_qty, price)
         if not ok:
             return None
-        if not self.client.verify_domestic_fill(symbol, "SELL", previous_qty, previous_qty):
+        fill_status = self.client.verify_domestic_fill(symbol, "SELL", previous_qty, previous_qty)
+        if fill_status == "PENDING":
+            logger.warning(
+                "⚠️ %s live sell fill pending: balance unavailable, local position preserved",
+                symbol,
+            )
+            self.sync(force=True)
+            return None
+        if not fill_status:
             self.sync(force=True)
             return None
 
@@ -185,8 +210,25 @@ class KISLiveBroker:
             reason=reason,
         )
         self._record(trade)
+        self._set_reentry_cooldown(symbol, reason)
         self.sync(force=True)
         return trade
+
+    def _set_reentry_cooldown(self, symbol: str, reason: str) -> None:
+        reason_lower = reason.lower()
+        is_stop = "stop" in reason_lower or "손절" in reason_lower
+        env_name = "V2_STOP_REENTRY_COOLDOWN_SEC" if is_stop else "V2_SELL_REENTRY_COOLDOWN_SEC"
+        default_sec = "1800" if is_stop else "600"
+        cooldown_sec = float(os.getenv(env_name, default_sec) or default_sec)
+        if cooldown_sec <= 0:
+            return
+        self._sell_cooldowns[symbol] = time.time() + cooldown_sec
+        logger.info(
+            "⏳ %s broker re-entry cooldown set: %.0fs (%s)",
+            symbol,
+            cooldown_sec,
+            "stop" if is_stop else "sell",
+        )
 
     def evaluate_exits(self, prices: dict[str, float], timestamp) -> list[Trade]:
         exits: list[Trade] = []
