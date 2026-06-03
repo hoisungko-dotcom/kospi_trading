@@ -1,10 +1,13 @@
-# KOSPI Bot v2
+# KR Bot
 
-기존 실전 봇을 건드리지 않고 옆에서 돌리는 한국주식 섀도우 트레이딩 봇입니다.
+한국주식 자동매매 봇입니다. 운영 중에는 **KR live bot**으로 부르고,
+버전 표기는 전략 기록에서만 다룹니다.
+
+> 참고: 디렉터리명은 마이그레이션 비용을 줄이기 위해 아직 `kospi_bot_v2`를 유지합니다.
 
 ## 설계 원칙
 
-- 실제 주문 없음: 첫 버전은 `PaperBroker`만 사용합니다.
+- 실전 모드는 `--live`, 섀도우 모드는 기본 실행으로 분리합니다.
 - 시장 레짐 우선: `BULL`, `NEUTRAL`, `WEAK`, `CRASH`를 먼저 판단합니다.
 - 전략 분리: 돌파, 눌림목, 약세장 상대강도, 인버스 ETF 신호를 분리합니다.
 - 리스크 예산: 장이 좋을 때는 열고, 나쁠 때는 포지션 수와 크기를 줄입니다.
@@ -61,7 +64,7 @@ symbol,name,timestamp,open,high,low,close,volume
 - `kospi_bot_v2/data/shadow_ledger.jsonl`
 - `kospi_bot_v2/reports/shadow_report_YYYYMMDD_HHMMSS.md`
 
-리포트 하단에는 기존 봇 로그와 v2 신호/가상매매 비교 섹션이 붙습니다.
+리포트 하단에는 기존 봇 로그와 섀도우 신호/가상매매 비교 섹션이 붙습니다.
 
 ## 환경 변수
 

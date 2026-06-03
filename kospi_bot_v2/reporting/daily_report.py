@@ -25,7 +25,7 @@ def write_daily_report(
     strategy_counts = Counter(signal.strategy.value for signal in signals)
 
     lines = [
-        f"# KOSPI Bot v2 Shadow Report - {timestamp:%Y-%m-%d %H:%M:%S}",
+        f"# KR shadow bot report - {timestamp:%Y-%m-%d %H:%M:%S}",
         "",
         f"- Market regime: `{regime.value}`",
         f"- Ending equity: `{equity:,.0f}`",

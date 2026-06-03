@@ -16,7 +16,7 @@ from kospi_bot_v2.runtime.shadow_runner import ShadowRunner
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="KOSPI bot v2 shadow runner")
+    parser = argparse.ArgumentParser(description="KR bot runner")
     parser.add_argument("--csv", type=Path, help="OHLCV CSV path for shadow evaluation")
     parser.add_argument("--sample", action="store_true", help="create and run with bundled sample CSV")
     parser.add_argument("--kis", action="store_true", help="use KIS quote-only market data")
@@ -78,7 +78,7 @@ def main() -> None:
         settings = type(settings)(**{**settings.__dict__, "include_account_snapshot": False})
     if args.live:
         setup_live_logging()
-        logging.getLogger(__name__).warning("⚠️ KOSPI v4.3 LIVE mode started — real KIS orders enabled")
+        logging.getLogger(__name__).warning("⚠️ KR live bot started — real KIS orders enabled")
         daily_symbols = load_daily_candidates()
         if daily_symbols:
             settings = type(settings)(**{**settings.__dict__, "universe_symbols": daily_symbols})
@@ -99,10 +99,10 @@ def main() -> None:
         from kospi_bot_v2.runtime.live_runner import LiveRunner
 
         runner = LiveRunner(settings, provider)
-        mode_label = "KOSPI v4.3 live"
+        mode_label = "KR live bot"
     else:
         runner = ShadowRunner(settings, provider)
-        mode_label = "KOSPI v2 shadow"
+        mode_label = "KR shadow bot"
 
     current_daily_symbols = tuple(settings.universe_symbols)
 
