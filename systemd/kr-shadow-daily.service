@@ -1,0 +1,12 @@
+[Unit]
+Description=KR Shadow Strategy League — daily finalization and report (16:00 KST)
+After=network.target
+
+[Service]
+Type=oneshot
+User=ubuntu
+WorkingDirectory=/home/ubuntu/kospi_trading_system
+ExecStart=/home/ubuntu/kospi_trading_system/venv/bin/python -m kospi_bot_v2.shadow.scripts.daily_finalize
+Environment=PYTHONUNBUFFERED=1
+StandardOutput=journal
+StandardError=journal

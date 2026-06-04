@@ -12,7 +12,42 @@ from kospi_bot_v2.config.settings import PROJECT_ROOT, V2_ROOT, load_settings
 from kospi_bot_v2.market.data_provider import CsvMarketDataProvider, write_sample_csv
 from kospi_bot_v2.notifications import send_telegram
 from kospi_bot_v2.runtime.market_hours import is_active_time, now_in_active_timezone
-from kospi_bot_v2.runtime.shadow_runner import ShadowRunner
+from kospi_bot_v2.shadow.snapshot import load_and_validate_snapshot
+
+
+def _do_post_close_snapshot(
+    runner: object,
+    snap_base_dir: Path,
+    max_retries: int = 3,
+    sleep_sec: int = 60,
+) -> bool:
+    """Write the final EOD snapshot via the snapshot-only path with bounded retry.
+
+    Returns True after a validated final snapshot is confirmed on disk.
+    Returns False if all attempts are exhausted (operator alert required).
+    Calls runner.run_post_close_snapshot_only() — no live broker operations.
+    """
+    _log = logging.getLogger(__name__)
+    for attempt in range(1, max_retries + 1):
+        try:
+            runner.run_post_close_snapshot_only()  # type: ignore[union-attr]
+            load_and_validate_snapshot(snap_base_dir)
+            _log.info(
+                "📸 post-close snapshot validated (attempt %d/%d)", attempt, max_retries
+            )
+            return True
+        except Exception as exc:
+            if attempt < max_retries:
+                _log.warning(
+                    "post-close snapshot attempt %d/%d failed, retry in %ds: %s",
+                    attempt, max_retries, sleep_sec, exc,
+                )
+                time.sleep(sleep_sec)
+            else:
+                _log.error(
+                    "post-close snapshot failed after %d attempts: %s", max_retries, exc
+                )
+    return False
 
 
 def parse_args() -> argparse.Namespace:
@@ -101,6 +136,8 @@ def main() -> None:
         runner = LiveRunner(settings, provider)
         mode_label = "KR live bot"
     else:
+        from kospi_bot_v2.runtime.shadow_runner import ShadowRunner
+
         runner = ShadowRunner(settings, provider)
         mode_label = "KR shadow bot"
 
@@ -133,7 +170,8 @@ def main() -> None:
         print(summary, flush=True)
 
     if args.loop:
-        _market_opened = [False]
+        _market_opened = [False]   # True while we are inside the active trading window
+        _post_close_done = [False]  # True once the post-close snapshot run has fired today
 
         def _send_shutdown(signum=None, frame=None) -> None:
             if args.notify:
@@ -147,23 +185,48 @@ def main() -> None:
             try:
                 active = args.ignore_hours or is_active_time(settings)
                 if active:
-                    if not _market_opened[0] and args.notify:
+                    if not _market_opened[0]:
+                        # Newly entered the active window — reset post-close flag for today
                         _market_opened[0] = True
-                        now = now_in_active_timezone(settings)
-                        send_telegram(
-                            f"🔔 한국봇 개장\n"
-                            f"시각: {now:%m/%d %H:%M KST}"
-                        )
+                        _post_close_done[0] = False
+                        if args.notify:
+                            now = now_in_active_timezone(settings)
+                            send_telegram(
+                                f"🔔 한국봇 개장\n"
+                                f"시각: {now:%m/%d %H:%M KST}"
+                            )
                     run_and_print()
                 else:
-                    _market_opened[0] = False
-                    now = now_in_active_timezone(settings)
-                    print(
-                        f"{mode_label}: sleeping outside active window "
-                        f"now={now:%Y-%m-%d %H:%M:%S %Z} "
-                        f"window={settings.active_start_hhmm:04d}-{settings.active_end_hhmm:04d}",
-                        flush=True,
-                    )
+                    if _market_opened[0] and not _post_close_done[0]:
+                        # P0-1/P0-3: active → inactive transition.
+                        # Live mode: snapshot-only path (no broker calls), with retry.
+                        # Shadow mode: full run_once() is safe (no real orders).
+                        _market_opened[0] = False
+                        if args.live:
+                            import os as _os
+                            _snap_base = Path(
+                                _os.getenv("SHADOW_STATE_DIR", "data/shadow_league")
+                            )
+                            if _do_post_close_snapshot(runner, _snap_base):
+                                _post_close_done[0] = True
+                        else:
+                            try:
+                                run_and_print()
+                                _post_close_done[0] = True
+                                logging.getLogger(__name__).info(
+                                    "📸 post-close snapshot run completed (is_final=True)"
+                                )
+                            except Exception as exc:
+                                logging.exception("post-close snapshot run failed: %s", exc)
+                    else:
+                        _market_opened[0] = False
+                        now = now_in_active_timezone(settings)
+                        print(
+                            f"{mode_label}: sleeping outside active window "
+                            f"now={now:%Y-%m-%d %H:%M:%S %Z} "
+                            f"window={settings.active_start_hhmm:04d}-{settings.active_end_hhmm:04d}",
+                            flush=True,
+                        )
             except KeyboardInterrupt:
                 _send_shutdown()
             except SystemExit:

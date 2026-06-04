@@ -1,0 +1,12 @@
+[Unit]
+Description=KR Shadow League weekly report on Fridays at 16:30 KST (07:30 UTC)
+Requires=kr-shadow-weekly.service
+
+[Timer]
+# 금요일 16:30 KST = 07:30 UTC. Verified with systemd-analyze calendar on AWS.
+OnCalendar=Fri *-*-* 07:30:00 UTC
+Persistent=true
+Unit=kr-shadow-weekly.service
+
+[Install]
+WantedBy=timers.target

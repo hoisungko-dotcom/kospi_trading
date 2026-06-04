@@ -4,10 +4,12 @@ import json
 import logging
 from collections import Counter
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone  # date used for type annotation
 import os
+from pathlib import Path
 
 from kospi_bot_v2.config.settings import ShadowSettings
+from kospi_bot_v2.shadow.runner_integration import shadow_evaluate
 from kospi_bot_v2.domain.models import MarketRegime, Signal, Trade
 from kospi_bot_v2.market.data_provider import MarketDataProvider
 from kospi_bot_v2.market.regime import RegimeClassifier
@@ -45,7 +47,8 @@ class LiveRunner:
         self._day_start_equity: float | None = None
 
     def _daily_pnl_pct(self, equity: float) -> float:
-        today = date.today()
+        # P0-3: use KST date so the intraday-high-water mark resets at KST midnight
+        today = datetime.now(timezone(timedelta(hours=9))).date()
         if self._day_start_date != today or not self._day_start_equity:
             self._day_start_date = today
             self._day_start_equity = equity
@@ -130,7 +133,64 @@ class LiveRunner:
             f"down={down_count}, pullback={pullback_pct * 100:.1f}%)",
         )
 
+    def run_post_close_snapshot_only(self) -> Path:
+        """Fetch market data and write the final EOD snapshot. No broker operations.
+
+        Called exactly once after the active window closes (≥15:30 KST).
+        Does NOT call broker.sync(), evaluate_exits(), buy(), or sell().
+        """
+        from kospi_bot_v2.shadow.snapshot import save_snapshot
+
+        _KST = timezone(timedelta(hours=9))
+        _today_kst = datetime.now(_KST).date()
+        trade_date = _today_kst.isoformat()
+
+        frame = self.provider.load_universe_frame()
+        snapshot = self.provider.market_snapshot(frame)
+        regime = self.regime_classifier.classify(snapshot)
+
+        latest = frame.sort_values("timestamp").groupby("symbol").tail(1)
+        prices = {str(row["symbol"]): float(row["close"]) for _, row in latest.iterrows()}
+
+        _snap_ts = snapshot.timestamp
+        if _snap_ts.tzinfo is None:
+            _snap_ts = _snap_ts.replace(tzinfo=_KST)
+        _session_date_kst = _snap_ts.astimezone(_KST).date()
+        _trading_day = (_session_date_kst == _today_kst)
+
+        _ohlcv = {
+            str(row["symbol"]): {
+                "open":  float(row.get("open",  row["close"])),
+                "high":  float(row.get("high",  row["close"])),
+                "low":   float(row.get("low",   row["close"])),
+                "close": float(row["close"]),
+            }
+            for _, row in latest.iterrows()
+            if str(row.get("symbol", "")).strip()
+        }
+
+        path = save_snapshot(
+            base_dir=Path(os.getenv("SHADOW_STATE_DIR", "data/shadow_league")),
+            trade_date=trade_date,
+            regime=regime.value,
+            kospi_pct=snapshot.kospi_change_pct / 100,
+            ohlcv_by_symbol=_ohlcv,
+            prices=prices,
+            trading_day=_trading_day,
+            session_date=_session_date_kst.isoformat(),
+            is_final=True,  # always final — only called post-close
+        )
+        logger.info("📸 post-close snapshot written (no broker ops): %s", path)
+        return path
+
     def run_once(self) -> LiveRunResult:
+        # P0-3: one canonical KST clock for this entire run_once() call.
+        # trade_date drives snapshot paths and shadow-portfolio daily state.
+        _KST = timezone(timedelta(hours=9))
+        _now_kst = datetime.now(_KST)
+        _today_kst = _now_kst.date()
+        trade_date = _today_kst.isoformat()
+
         frame = self.provider.load_universe_frame()
         snapshot = self.provider.market_snapshot(frame)
         regime = self.regime_classifier.classify(snapshot)
@@ -146,30 +206,57 @@ class LiveRunner:
         latest = frame.sort_values("timestamp").groupby("symbol").tail(1)
         prices = {str(row["symbol"]): float(row["close"]) for _, row in latest.iterrows()}
 
+        # P0-2: compute _trading_day BEFORE any broker order operations.
+        # Naive timestamps from KISQuoteOnlyProvider represent KST (P1-1 follow-up).
+        _snap_ts = snapshot.timestamp
+        if _snap_ts.tzinfo is None:
+            _snap_ts = _snap_ts.replace(tzinfo=_KST)  # naive → KST
+        _session_date_kst = _snap_ts.astimezone(_KST).date()
+        _trading_day = (_session_date_kst == _today_kst)
+
         self.broker.sync()
-        missing_position_symbols = [
-            symbol for symbol in self.broker.positions
-            if symbol not in prices
-        ]
-        if missing_position_symbols:
-            try:
-                live_prices = self.broker.client.get_current_prices(missing_position_symbols)
-            except Exception as exc:
-                live_prices = {}
-                logger.warning(
-                    "⚠️ held position live price lookup failed for %s: %s",
-                    missing_position_symbols,
-                    exc,
-                )
-            for symbol, price in live_prices.items():
-                if price:
-                    prices[symbol] = float(price)
+
+        exits: list[Trade] = []
+        if not _trading_day:
             logger.info(
-                "💹 held position prices refreshed: requested=%s received=%s",
-                missing_position_symbols,
-                sorted(live_prices.keys()),
+                "broker exits/entries skipped — non-trading day "
+                "(session_date=%s ≠ today_kst=%s: KRX holiday or stale data)",
+                _session_date_kst, _today_kst,
             )
-        exits = self.broker.evaluate_exits(prices, snapshot.timestamp)
+        else:
+            missing_position_symbols = [
+                symbol for symbol in self.broker.positions
+                if symbol not in prices
+            ]
+            if missing_position_symbols:
+                try:
+                    live_prices = self.broker.client.get_current_prices(missing_position_symbols)
+                except Exception as exc:
+                    live_prices = {}
+                    logger.warning(
+                        "⚠️ held position live price lookup failed for %s: %s",
+                        missing_position_symbols,
+                        exc,
+                    )
+                for symbol, price in live_prices.items():
+                    if price:
+                        prices[symbol] = float(price)
+                logger.info(
+                    "💹 held position prices refreshed: requested=%s received=%s",
+                    missing_position_symbols,
+                    sorted(live_prices.keys()),
+                )
+            exits = self.broker.evaluate_exits(prices, snapshot.timestamp)
+
+        # P0-2: skip shadow evaluation on non-trading days (holiday / stale provider data)
+        if _trading_day:
+            shadow_evaluate(latest, regime.value, prices, snapshot.timestamp, trade_date)
+        else:
+            logger.info(
+                "shadow_evaluate skipped — non-trading day "
+                "(session_date=%s ≠ today_kst=%s: KRX holiday or stale data)",
+                _session_date_kst, _today_kst,
+            )
 
         signals = self.signal_engine.generate(frame, regime)
         diagnostics = self.signal_engine.diagnose(frame, regime)
@@ -205,36 +292,39 @@ class LiveRunner:
         daily_pnl_pct = self._daily_pnl_pct(equity)
 
         executed: list[Signal] = []
-        cooldowns = self._recent_sell_cooldowns()
-        for signal in signals:
-            signal.metadata["evaluated_at"] = snapshot.timestamp
-            if signal.symbol in self.broker.positions:
-                continue
-            if signal.symbol in cooldowns:
-                logger.info(
-                    "⏳ %s entry skipped: loss re-entry cooldown until %s",
-                    signal.symbol,
-                    cooldowns[signal.symbol].strftime("%H:%M:%S"),
-                )
-                continue
-            minute_ok, minute_reason = self._minute_entry_confirm(signal)
-            if not minute_ok:
-                logger.info("⏸️ %s entry deferred: %s", signal.symbol, minute_reason)
-                continue
-            logger.info("✅ %s entry minute confirm: %s", signal.symbol, minute_reason)
-            allowed, deny_reason = self.guard.allow_new_entry(regime, self.broker.positions, daily_pnl_pct)
-            if not allowed:
-                logger.info("⛔ %s entry blocked: %s", signal.symbol, deny_reason)
-                break
-            quantity = self.sizer.quantity(self.broker.cash, self.broker.equity(prices), signal, regime)
-            trade = self.broker.buy(signal, quantity)
-            if trade:
-                executed.append(signal)
-
-        if executed:
-            logger.warning("✅ live buys: %s", [s.symbol for s in executed])
+        if not _trading_day:
+            logger.info("— live new buy 없음 (non-trading day)")
         else:
-            logger.info("— live new buy 없음")
+            cooldowns = self._recent_sell_cooldowns()
+            for signal in signals:
+                signal.metadata["evaluated_at"] = snapshot.timestamp
+                if signal.symbol in self.broker.positions:
+                    continue
+                if signal.symbol in cooldowns:
+                    logger.info(
+                        "⏳ %s entry skipped: loss re-entry cooldown until %s",
+                        signal.symbol,
+                        cooldowns[signal.symbol].strftime("%H:%M:%S"),
+                    )
+                    continue
+                minute_ok, minute_reason = self._minute_entry_confirm(signal)
+                if not minute_ok:
+                    logger.info("⏸️ %s entry deferred: %s", signal.symbol, minute_reason)
+                    continue
+                logger.info("✅ %s entry minute confirm: %s", signal.symbol, minute_reason)
+                allowed, deny_reason = self.guard.allow_new_entry(regime, self.broker.positions, daily_pnl_pct)
+                if not allowed:
+                    logger.info("⛔ %s entry blocked: %s", signal.symbol, deny_reason)
+                    break
+                quantity = self.sizer.quantity(self.broker.cash, self.broker.equity(prices), signal, regime)
+                trade = self.broker.buy(signal, quantity)
+                if trade:
+                    executed.append(signal)
+
+            if executed:
+                logger.warning("✅ live buys: %s", [s.symbol for s in executed])
+            else:
+                logger.info("— live new buy 없음")
 
         equity = self.broker.equity(prices)
         report_path = write_daily_report(
@@ -248,6 +338,38 @@ class LiveRunner:
         )
         legacy = summarize_legacy_log(self.settings.compare_log_path)
         append_comparison_section(report_path, legacy, signals, self.broker.trades)
+
+        # Persist EOD snapshot for kr-shadow-daily.service
+        try:
+            from kospi_bot_v2.shadow.snapshot import save_snapshot
+            _ohlcv = {
+                str(row["symbol"]): {
+                    "open":  float(row.get("open",  row["close"])),
+                    "high":  float(row.get("high",  row["close"])),
+                    "low":   float(row.get("low",   row["close"])),
+                    "close": float(row["close"]),
+                }
+                for _, row in latest.iterrows()
+                if str(row.get("symbol", "")).strip()
+            }
+            # Use values already computed at the top of run_once() (P0-1/P0-2/P0-3).
+            # P1-1: recompute from actual wall time — run_once() may take minutes to execute.
+            _save_kst = datetime.now(_KST)
+            _is_final = (_save_kst.hour > 15 or
+                         (_save_kst.hour == 15 and _save_kst.minute >= 30))
+            save_snapshot(
+                base_dir=Path(os.getenv("SHADOW_STATE_DIR", "data/shadow_league")),
+                trade_date=trade_date,
+                regime=regime.value,
+                kospi_pct=snapshot.kospi_change_pct / 100,  # stored as fraction
+                ohlcv_by_symbol=_ohlcv,
+                prices=prices,
+                trading_day=_trading_day,
+                session_date=_session_date_kst.isoformat(),
+                is_final=_is_final,
+            )
+        except Exception as _snap_exc:
+            logger.warning("EOD snapshot dump failed (non-fatal): %s", _snap_exc)
 
         return LiveRunResult(
             regime=regime,
