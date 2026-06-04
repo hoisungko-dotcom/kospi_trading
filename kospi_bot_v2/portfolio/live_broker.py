@@ -124,7 +124,17 @@ class KISLiveBroker:
             value += position.market_value(prices.get(symbol, position.entry_price))
         return value
 
+    def _new_entries_enabled(self) -> bool:
+        val = os.getenv("V2_NEW_ENTRIES_ENABLED", "true").lower().strip()
+        return val not in ("false", "0", "no", "off")
+
     def buy(self, signal: Signal, quantity: int) -> Trade | None:
+        if not self._new_entries_enabled():
+            logger.info(
+                "🚫 %s live buy blocked: V2_NEW_ENTRIES_ENABLED=false (kill switch active)",
+                signal.symbol,
+            )
+            return None
         if quantity <= 0 or signal.symbol in self.positions:
             return None
         cooldown_until = self._sell_cooldowns.get(signal.symbol, 0.0)

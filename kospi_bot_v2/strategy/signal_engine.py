@@ -140,7 +140,6 @@ class SignalEngine:
 
     def _strategy_for(self, row: pd.Series, regime: MarketRegime) -> StrategyType | None:
         close = float(row["close"])
-        sma5 = float(row.get("sma5", close) or close)
         sma20 = float(row.get("sma20", close) or close)
         sma60 = float(row.get("sma60", close) or close)
         high20 = float(row.get("high20", close) or close)
@@ -149,20 +148,16 @@ class SignalEngine:
         rsi = float(row.get("rsi14", 50) or 50)
         return5 = float(row.get("return5", 0) or 0)
         return20 = float(row.get("return20", 0) or 0)
-        atr_pct = float(row.get("atr_pct", 0.02) or 0.02)
         consecutive_buy_days = int(row.get("consecutive_buy_days", 0) or 0)
 
         volume_ratio = volume / max(avg_volume20, 1)
-        if regime in {MarketRegime.WEAK, MarketRegime.CRASH}:
-            if close > sma20 and close >= sma5 * 0.995 and sma20 >= sma60 * 0.98 and -0.08 <= return5 <= 0.06 and -0.05 <= return20 <= 0.35 and 42 <= rsi <= 64 and atr_pct <= 0.08 and volume_ratio >= 0.65:
-                return StrategyType.DEFENSE_LONG
-            if regime is MarketRegime.CRASH:
-                if close > sma20 and close >= sma5 * 0.995 and volume_ratio >= 0.75 and 45 <= rsi <= 68 and -0.03 <= return5 <= 0.08 and -0.05 <= return20 <= 0.40 and atr_pct <= 0.12:
-                    return StrategyType.DEFENSE_LONG
-                volume_surge_crash = avg_volume20 > 0 and volume >= avg_volume20 * 2.0
-                if high20 > 0 and close >= high20 * 0.99 and volume_surge_crash and rsi <= 72 and return20 <= 0.40:
-                    return StrategyType.BREAKOUT
-                return None
+        # DEFENSE_LONG disabled: structurally buys rebounds in downtrends (negative expectancy confirmed in backtest)
+        if regime is MarketRegime.CRASH:
+            volume_surge_crash = avg_volume20 > 0 and volume >= avg_volume20 * 2.0
+            if high20 > 0 and close >= high20 * 0.99 and volume_surge_crash and rsi <= 72 and return20 <= 0.40:
+                return StrategyType.BREAKOUT
+            return None
+        # WEAK regime: falls through to normal strategies below (individual stock strength may still be sufficient)
 
         volume_surge = avg_volume20 > 0 and volume >= avg_volume20 * 1.5
         if high20 > 0 and close >= high20 * 0.995 and volume_surge:
