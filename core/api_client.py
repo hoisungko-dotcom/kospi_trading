@@ -440,8 +440,8 @@ class KISClient:
                     if result.get("rt_cd") == "0":
                         field = "max_buy_amt" if use_max else "ord_psbl_cash"
                         return float(result.get("output", {}).get(field, 0) or 0)
-                    if result.get("msg_cd") == "EGW00123" and auth_attempt == 0:
-                        logger.warning("⚠️ 주문가능금액 토큰 만료 — 재발급 재시도")
+                    if result.get("msg_cd") in ("EGW00121", "EGW00123") and auth_attempt == 0:
+                        logger.warning("⚠️ 주문가능금액 토큰 오류(%s) — 재발급 재시도", result.get("msg_cd"))
                         self._delete_cached_token(self.trade_appkey)
                         self.trade_token = self._get_token(
                             self.trade_base_url, self.trade_appkey, self.trade_appsecret

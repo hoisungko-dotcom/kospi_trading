@@ -35,6 +35,7 @@ class KISLiveBroker:
         self._last_sync_t: float = 0.0
         self._sync_min_interval_sec: float = float(os.getenv("V2_BALANCE_SYNC_MIN_INTERVAL_SEC", "90") or 90)
         self._sell_cooldowns: dict[str, float] = {}
+        self._attempted_symbols: set[str] = set()
         self.sync(force=True)
 
     def _alert(self, text: str) -> None:
@@ -134,6 +135,9 @@ class KISLiveBroker:
                 cooldown_until - time.time(),
             )
             return None
+        if signal.symbol in self._attempted_symbols:
+            logger.info("⏭ %s live buy skipped: already attempted this session", signal.symbol)
+            return None
         orderable = self.client.get_orderable_cash(signal.symbol, signal.price, use_max=True)
         if orderable >= 0 and signal.price * quantity > orderable:
             quantity = int((orderable * 0.99) // signal.price)
@@ -157,9 +161,11 @@ class KISLiveBroker:
                 "⚠️ %s live buy fill pending: balance unavailable, no local record and no retry",
                 signal.symbol,
             )
+            self._attempted_symbols.add(signal.symbol)
             self.sync(force=True)
             return None
         if not fill_status:
+            self._attempted_symbols.add(signal.symbol)
             self.sync(force=True)
             return None
 
