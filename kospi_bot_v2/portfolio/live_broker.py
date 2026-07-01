@@ -13,18 +13,18 @@ from kospi_bot_v2.domain.models import Position, Signal, SignalAction, StrategyT
 logger = logging.getLogger(__name__)
 
 
-class KISLiveBroker:
-    """KIS-backed live broker for the v4.3 engine.
+class BrokerLiveAdapter:
+    """Broker-backed live adapter for the v4.3 engine.
 
     The strategy and risk engine stay in kospi_bot_v2; this adapter only
-    converts accepted signals into real KIS domestic stock orders and rebuilds
+    converts accepted signals into real broker domestic stock orders and rebuilds
     in-memory positions from the account balance after each order.
     """
 
     def __init__(self, settings: ShadowSettings):
         self.settings = settings
         self.settings.ledger_path.parent.mkdir(parents=True, exist_ok=True)
-        from core.kis_client_kospi import KISClientKospi
+        from brokers.kis.client import KISClientKospi
 
         self.client = KISClientKospi()
         self.positions: dict[str, Position] = {}
@@ -55,7 +55,7 @@ class KISLiveBroker:
         has_cached_state = bool(self.positions) or self.cash > 0
         if not force and has_cached_state and now - self._last_sync_t < self._sync_min_interval_sec:
             logger.info(
-                "↻ KIS live sync reused cached account state: cash ₩%.0f, positions %d, age %.1fs",
+                "↻ broker live sync reused cached account state: cash ₩%.0f, positions %d, age %.1fs",
                 self.cash,
                 len(self.positions),
                 now - self._last_sync_t,
@@ -68,23 +68,23 @@ class KISLiveBroker:
             if self._sync_fail_count >= 3 and not has_cached_state:
                 ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 msg = (
-                    f"❌ 한국봇 v4.3 KIS 잔고조회 {self._sync_fail_count}회 연속 실패\n"
+                    f"❌ 한국봇 v4.3 broker 잔고조회 {self._sync_fail_count}회 연속 실패\n"
                     f"캐시된 계좌 상태 없음 — 즉시 확인 필요\n"
                     f"시각: {ts}"
                 )
                 self._alert(msg)
             elif self._sync_fail_count >= 3:
                 logger.warning(
-                    "⚠️ KIS live sync failed %d times, but cached account state is preserved",
+                    "⚠️ broker live sync failed %d times, but cached account state is preserved",
                     self._sync_fail_count,
                 )
             if not self.positions and self.cash <= 0:
                 logger.warning(
-                    "⚠️ KIS live sync skipped: balance unavailable, no cached account state yet"
+                    "⚠️ broker live sync skipped: balance unavailable, no cached account state yet"
                 )
             else:
                 logger.warning(
-                    "⚠️ KIS live sync skipped: balance unavailable, keeping cached cash ₩%.0f and positions %d",
+                    "⚠️ broker live sync skipped: balance unavailable, keeping cached cash ₩%.0f and positions %d",
                     self.cash,
                     len(self.positions),
                 )
@@ -112,10 +112,10 @@ class KISLiveBroker:
                 quantity=qty,
                 peak_price=max(entry_price, current_price),
                 stop_price=entry_price * (1 + self.settings.stop_loss_pct),
-                metadata={"source": "kis_balance"},
+                metadata={"source": "broker_balance"},
             )
         self.positions = rebuilt
-        logger.info("✅ KIS live sync: cash ₩%.0f, positions %d", self.cash, len(self.positions))
+        logger.info("✅ broker live sync: cash ₩%.0f, positions %d", self.cash, len(self.positions))
 
     def equity(self, prices: dict[str, float] | None = None) -> float:
         prices = prices or {}
@@ -314,7 +314,10 @@ class KISLiveBroker:
             "quantity": trade.quantity,
             "pnl_pct": trade.pnl_pct,
             "reason": trade.reason,
-            "broker": "kis_live",
+            "broker": "broker_live",
         }
         with Path(self.settings.ledger_path).open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
+
+
+KISLiveBroker = BrokerLiveAdapter

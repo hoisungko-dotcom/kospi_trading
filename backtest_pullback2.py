@@ -15,9 +15,9 @@ import numpy as np
 import FinanceDataReader as fdr
 from datetime import datetime, timedelta
 
-from core.signal_analyzer_kospi import SignalAnalyzerKospi
+from strategy.signal_analyzer import SignalAnalyzerKospi
 from core.investor_flow import InvestorFlow
-from core.risk_management import RiskManagement
+from strategy.risk import RiskManagement
 
 INITIAL = 10_000_000
 DAYS    = 90

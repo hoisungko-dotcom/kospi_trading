@@ -11,7 +11,7 @@ import time
 from kospi_bot_v2.config.settings import PROJECT_ROOT, V2_ROOT, load_settings
 from kospi_bot_v2.market.data_provider import CsvMarketDataProvider, write_sample_csv
 from kospi_bot_v2.notifications import send_telegram
-from kospi_bot_v2.runtime.market_hours import is_active_time, now_in_active_timezone
+from runtime.market_hours import is_active_time, now_in_active_timezone
 from kospi_bot_v2.shadow.snapshot import load_and_validate_snapshot
 
 
@@ -54,12 +54,12 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="KR bot runner")
     parser.add_argument("--csv", type=Path, help="OHLCV CSV path for shadow evaluation")
     parser.add_argument("--sample", action="store_true", help="create and run with bundled sample CSV")
-    parser.add_argument("--kis", action="store_true", help="use KIS quote-only market data")
+    parser.add_argument("--broker-quote", action="store_true", help="use broker quote-only market data")
     parser.add_argument("--loop", action="store_true", help="run repeatedly using V2_LOOP_INTERVAL_SEC")
     parser.add_argument("--notify", action="store_true", help="send Telegram summary when configured")
     parser.add_argument("--no-account", action="store_true", help="disable read-only account snapshot")
     parser.add_argument("--ignore-hours", action="store_true", help="run loop outside configured KST market window")
-    parser.add_argument("--live", action="store_true", help="send real KIS orders with the v4.3 engine")
+    parser.add_argument("--live", action="store_true", help="send real broker orders with the v4.3 engine")
     return parser.parse_args()
 
 
@@ -113,13 +113,13 @@ def main() -> None:
         settings = type(settings)(**{**settings.__dict__, "include_account_snapshot": False})
     if args.live:
         setup_live_logging()
-        logging.getLogger(__name__).warning("⚠️ KR live bot started — real KIS orders enabled")
+        logging.getLogger(__name__).warning("⚠️ KR live bot started — real broker orders enabled")
         daily_symbols = load_daily_candidates()
         if daily_symbols:
             settings = type(settings)(**{**settings.__dict__, "universe_symbols": daily_symbols})
 
-    if args.kis:
-        from kospi_bot_v2.market.kis_quote_provider import KISQuoteOnlyProvider
+    if args.broker_quote:
+        from brokers.kis.quote_provider import KISQuoteOnlyProvider
 
         provider = KISQuoteOnlyProvider(settings.universe_symbols)
     else:
@@ -131,7 +131,7 @@ def main() -> None:
         provider = CsvMarketDataProvider(csv_path)
 
     if args.live:
-        from kospi_bot_v2.runtime.live_runner import LiveRunner
+        from runtime.live_runner import LiveRunner
 
         runner = LiveRunner(settings, provider)
         mode_label = "KR live bot"
@@ -145,7 +145,7 @@ def main() -> None:
 
     def refresh_live_universe() -> None:
         nonlocal current_daily_symbols
-        if not (args.live and args.kis):
+        if not (args.live and args.broker_quote):
             return
         daily_symbols = load_daily_candidates()
         if not daily_symbols:

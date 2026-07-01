@@ -6,9 +6,9 @@ from unittest.mock import MagicMock
 
 import pandas as pd
 
-from core.kis_client_kospi import KISClientKospi
+from brokers.kis.client import KISClientKospi
 from kospi_bot_v2.domain.models import Position, Signal, SignalAction, StrategyType
-from kospi_bot_v2.portfolio.live_broker import KISLiveBroker
+from kospi_bot_v2.portfolio.live_broker import BrokerLiveAdapter
 from kospi_bot_v2.runtime.live_runner import LiveRunner
 
 
@@ -30,7 +30,7 @@ def test_verify_domestic_fill_returns_pending_when_balance_unavailable(monkeypat
 
 
 def test_live_broker_buy_skips_symbol_in_reentry_cooldown():
-    broker = KISLiveBroker.__new__(KISLiveBroker)
+    broker = BrokerLiveAdapter.__new__(BrokerLiveAdapter)
     broker.positions = {}
     broker._sell_cooldowns = {"005930": time.time() + 60}
 
@@ -102,9 +102,9 @@ def _make_signal(symbol: str = "005930") -> Signal:
     )
 
 
-def _make_broker_shell() -> KISLiveBroker:
-    """Minimal broker instance that bypasses KIS network init."""
-    broker = KISLiveBroker.__new__(KISLiveBroker)
+def _make_broker_shell() -> BrokerLiveAdapter:
+    """Minimal broker instance that bypasses broker network init."""
+    broker = BrokerLiveAdapter.__new__(BrokerLiveAdapter)
     broker.positions = {}
     broker._sell_cooldowns = {}
     broker._attempted_symbols = set()

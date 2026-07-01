@@ -21,10 +21,10 @@ MIN_TURNOVER_SCREEN = float(os.getenv("MIN_TURNOVER_SCREEN", "3000000000"))  # 3
 
 
 class Screener:
-    def __init__(self, kis_client, async_client):
-        self.kis_client   = kis_client
+    def __init__(self, broker_client, async_client):
+        self.broker_client = broker_client
         self.async_client = async_client
-        self.engine       = SignalEngine()
+        self.engine = SignalEngine()
 
     def run(
         self,

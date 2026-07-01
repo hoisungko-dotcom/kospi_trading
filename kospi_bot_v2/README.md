@@ -1,7 +1,7 @@
 # KR Bot
 
-한국주식 자동매매 봇입니다. 운영 중에는 **KR live bot**으로 부르고,
-버전 표기는 전략 기록에서만 다룹니다.
+한국주식 자동매매 런타임입니다. 운영 표기는 **KR live bot**으로 통일하고,
+브로커 브랜드명은 공통 런타임 문서와 로그에서 최소화합니다.
 
 > 참고: 디렉터리명은 마이그레이션 비용을 줄이기 위해 아직 `kospi_bot_v2`를 유지합니다.
 
@@ -21,16 +21,16 @@
 python -m kospi_bot_v2.main --sample
 ```
 
-KIS 시세만 사용해서 1회 실행:
+브로커 시세만 사용해서 1회 실행:
 
 ```bash
-python -m kospi_bot_v2.main --kis
+python -m kospi_bot_v2.main --broker-quote
 ```
 
-KIS 시세만 사용해서 반복 실행:
+브로커 시세만 사용해서 반복 실행:
 
 ```bash
-python -m kospi_bot_v2.main --kis --loop
+python -m kospi_bot_v2.main --broker-quote --loop
 ```
 
 백그라운드 실행:
@@ -44,7 +44,7 @@ bash kospi_bot_v2/stop_shadow_loop.sh
 텔레그램이 `.env`에 설정되어 있으면 요약 알림:
 
 ```bash
-python -m kospi_bot_v2.main --kis --loop --notify
+python -m kospi_bot_v2.main --broker-quote --loop --notify
 ```
 
 직접 만든 OHLCV CSV로 실행:
@@ -86,13 +86,19 @@ V2_DAILY_LOSS_LIMIT_PCT=-0.025
 잔고 조회를 끄고 싶을 때:
 
 ```bash
-python -m kospi_bot_v2.main --kis --no-account
+python -m kospi_bot_v2.main --broker-quote --no-account
 ```
 
 장외에도 강제로 실행하고 싶을 때:
 
 ```bash
-python -m kospi_bot_v2.main --kis --loop --ignore-hours
+python -m kospi_bot_v2.main --broker-quote --loop --ignore-hours
+```
+
+실거래 모드:
+
+```bash
+python -m kospi_bot_v2.main --live --broker-quote --loop
 ```
 
 ## 다음 단계
@@ -102,3 +108,8 @@ python -m kospi_bot_v2.main --kis --loop --ignore-hours
 3. 약세장 인버스 ETF 엔진 정교화
 4. 전략별 파라미터 튜닝
 5. 실전 전환 여부 판단
+
+## 상태 메모
+
+- 현재 `runtime/` 경로가 표준 진입점이며 `kospi_bot_v2/runtime/`는 호환 래퍼를 유지합니다.
+- 브로커별 실제 구현은 점진적으로 `brokers/`로 이동 중입니다.

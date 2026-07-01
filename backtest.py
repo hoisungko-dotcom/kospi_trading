@@ -8,12 +8,11 @@ from rich import print as rprint
 import FinanceDataReader as fdr
 
 # 코어 전략 모듈 임포트
-from core.api_client import KISClient
+from brokers.kis.api_client import KISClient
 from core.market_data_kospi import MarketDataKOSPI
-from core.signal_analyzer_kospi import SignalAnalyzerKospi
-from core.risk_management import RiskManagement
+from strategy.signal_analyzer import SignalAnalyzerKospi
+from strategy.risk import RiskManagement
 from core.investor_flow import InvestorFlow
-
 from core.dynamic_exit_analyzer_kospi import DynamicExitAnalyzerKospi
 
 console = Console()

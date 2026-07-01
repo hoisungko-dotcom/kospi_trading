@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime
 import logging
 
-from core.api_client import KISClient
+from brokers.kis.api_client import KISClient
 
 
 logger = logging.getLogger(__name__)
@@ -36,10 +36,10 @@ class AccountSnapshot:
     error: str | None = None
 
 
-class ReadOnlyAccountClient:
-    """Read-only KIS account adapter for v2 reports.
+class ReadOnlyBrokerAccountClient:
+    """Read-only broker account adapter for v2 reports.
 
-    This class intentionally exposes no order methods. It only calls KIS
+    This class intentionally exposes no order methods. It only calls broker
     inquire-balance and parses the response for reporting.
     """
 
@@ -51,7 +51,7 @@ class ReadOnlyAccountClient:
             self.client.trade_appsecret,
         )
         if not self.client.trade_token:
-            raise RuntimeError("KIS trade token unavailable for read-only balance.")
+            raise RuntimeError("Broker trade token unavailable for read-only balance.")
 
     def snapshot(self) -> AccountSnapshot:
         raw = self.client.get_kr_balance()
@@ -121,3 +121,6 @@ class ReadOnlyAccountClient:
             return float(str(row.get(key, 0) or 0).replace(",", ""))
         except Exception:
             return 0.0
+
+
+ReadOnlyAccountClient = ReadOnlyBrokerAccountClient

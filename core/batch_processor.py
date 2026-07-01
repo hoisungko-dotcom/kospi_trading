@@ -66,8 +66,8 @@ def _init_db():
 class BatchProcessor:
     """매일 23:00 코스피+코스닥 전종목 분석 후 상위 10개 선별"""
 
-    def __init__(self, kis_client, max_workers: int = 4):
-        self.market_data   = MarketDataKOSPI(kis_client)
+    def __init__(self, market_data_client, max_workers: int = 4):
+        self.market_data   = MarketDataKOSPI(market_data_client)
         self.signal_engine = IntegratedSignal()
         self.max_workers   = max_workers
         _init_db()

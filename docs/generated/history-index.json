@@ -1,0 +1,12 @@
+[
+  {
+    "category": "account_migrations",
+    "relative_path": "data/account_migrations/20260701_172750_pre_kiwoom_mock_switch.json",
+    "filename": "20260701_172750_pre_kiwoom_mock_switch.json"
+  },
+  {
+    "category": "runtime_state",
+    "relative_path": "data/kiwoom_mock_account_state.json",
+    "filename": "kiwoom_mock_account_state.json"
+  }
+]

@@ -20,14 +20,14 @@ def format_currency(value):
 
 
 def perform_sync():
-    """KIS API와 동기화 수행"""
+    """브로커 API와 동기화 수행"""
     try:
-        from core.kis_client_kospi import KISClientKospi
-        from core.position_manager import PositionManager
+        from brokers.kis.client import KISClientKospi
+        from state.position_manager import PositionManager
 
-        print("🔄 KIS API와 계좌 정보를 동기화 중...")
-        kis     = KISClientKospi()
-        balance = kis.get_balance()
+        print("🔄 브로커 API와 계좌 정보를 동기화 중...")
+        broker = KISClientKospi()
+        balance = broker.get_balance()
 
         if balance:
             pm = PositionManager()
@@ -46,11 +46,11 @@ def perform_sync():
 
 
 def _get_live_prices(holdings: dict) -> dict:
-    """KIS API로 보유 종목 현재가 조회. 실패 시 빈 dict."""
+    """브로커 API로 보유 종목 현재가 조회. 실패 시 빈 dict."""
     if not holdings:
         return {}
     try:
-        from core.api_client import KISClient
+        from brokers.kis.api_client import KISClient
         client = KISClient()
         client.authenticate()
         prices = {}
@@ -89,7 +89,7 @@ def show_status(live: bool = False):
     # 현재가 조회 (--live 또는 live=True 시)
     live_prices: dict = {}
     if live:
-        print("📡 KIS API에서 현재가 조회 중...")
+        print("📡 브로커 API에서 현재가 조회 중...")
         live_prices = _get_live_prices(holdings)
 
     # 평가금액 계산

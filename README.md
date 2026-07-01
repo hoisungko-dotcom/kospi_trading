@@ -1,138 +1,61 @@
-# KOSPI 자동매매 시스템
+# KR Trading System
 
-코스피 6종목 + 코스닥 4종목에 집중하는 국내 주식 자동매매 봇입니다.  
-한국투자증권(KIS) Open API를 사용하며, **처음에는 반드시 모의투자 모드**로 시작하세요.
+국내 주식 자동매매 시스템입니다. 현재 저장소는 단일 봇 스크립트에서
+브로커 교체형 SaaS 구조로 정리하는 중이며, 공통 계층과 브로커 계층을 분리하는 방향으로 운영합니다.
 
-## 주요 기능
+## 현재 구조
 
-- 매일 08:30 코스피 전체 + 코스닥 상위 300 종목 스캔 → 매수 후보 선정
-- 09:00~15:30 5분마다 신호 확인 및 자동 매수/매도
-- 텔레그램 알림 (선택)
-- Claude AI 매도 판단 (선택)
-- 모의투자 / 실전투자 전환 지원
+- `brokers/`: KIS, Kiwoom 등 브로커별 구현
+- `runtime/`: 실행 엔트리포인트, 장시간, 오케스트레이션
+- `services/`: 잔고, 섹터, 운영 보조 서비스
+- `state/`: 계좌 스냅샷, 포지션 상태
+- `strategy/`: 신호, 리스크, 전략 로직
+- `docs/`: 시스템 지도, 운영 문서, 이력 인덱스
 
----
+전체 구조와 수정 지점은 [docs/README.md](/Users/hoisung/Downloads/kospi_trading_system/docs/README.md)부터 보면 됩니다.
 
-## 설치 방법
+## 실행 진입점
 
-### 1. Python 설치
+기존 로컬 실거래 엔진:
 
-Python 3.11 이상이 필요합니다.  
-[python.org](https://www.python.org/downloads/) 에서 다운로드 후 설치하세요.  
-설치 시 **"Add Python to PATH"** 체크박스를 반드시 체크하세요.
-
-### 2. 소스코드 다운로드
-
-이 저장소를 ZIP으로 다운로드하거나 git clone 하세요.
-
-```
-git clone https://github.com/<username>/kospi_trading_system.git
-cd kospi_trading_system
-```
-
-### 3. 패키지 설치
-
-터미널(명령 프롬프트)에서 프로젝트 폴더로 이동 후:
-
-```
-pip install -r requirements.txt
-```
-
-### 4. 환경 변수 설정
-
-`.env.example` 파일을 복사해 `.env` 파일을 만드세요.
-
-**Windows:**
-```
-copy .env.example .env
-```
-
-**Mac/Linux:**
-```
-cp .env.example .env
-```
-
-`.env` 파일을 메모장(또는 텍스트 편집기)으로 열어 KIS API 키를 입력하세요.
-
----
-
-## KIS API 키 발급 방법
-
-1. [한국투자증권 홈페이지](https://securities.koreainvestment.com) 로그인
-2. 상단 메뉴 → **트레이딩** → **Open API**
-3. **API 신청하기** 클릭
-4. 모의투자 신청 후 앱키(APP KEY)와 앱시크릿(APP SECRET) 발급
-5. `.env` 파일에 입력
-
-> **모의 계좌번호**는 KIS 홈페이지 → 계좌번호 조회에서 확인할 수 있습니다.
-
----
-
-## 실행 방법
-
-```
+```bash
 python main.py
 ```
 
-처음에는 `.env` 파일에서 `MOCK_TRADING=true` 로 설정된 상태로 시작됩니다.  
-2~4주 모의 운용 후 전략이 맞는다고 판단되면 실전으로 전환하세요.
+모듈형 KR bot 엔진:
 
----
-
-## 실전투자 전환
-
-`.env` 파일에서 아래 두 항목을 수정하세요.
-
-```
-MOCK_TRADING=false
-LIVE_TRADING_CONFIRMED=true
+```bash
+python -m kospi_bot_v2.main --sample
+python -m kospi_bot_v2.main --broker-quote
+python -m kospi_bot_v2.main --broker-quote --loop
+python -m kospi_bot_v2.main --live --broker-quote --loop
 ```
 
-> 실전 전환 후 발생하는 손실에 대한 책임은 사용자 본인에게 있습니다.
+## 브로커 설정 원칙
 
----
+- 공통 코드에서는 브로커 브랜드명을 직접 쓰지 않습니다.
+- 브로커별 키와 계좌 설정은 브로커 어댑터 레이어에서만 처리합니다.
+- 새 설정은 표준 키를 우선 사용하고, 과거 키는 호환 fallback만 유지합니다.
 
-## Claude AI 매도 판단 설정 (선택)
+대표 표준 키 예시:
 
-AI가 수익 구간에서 매도 여부를 판단합니다. 없어도 기본 지표 기반으로 동작합니다.
+```text
+BROKER_PROFILE=kiwoom_full
+BROKER_SYNC_INTERVAL_SEC=20
+BOX_BOT_UNIVERSE_BROKER_MARKET=KOSPI
+```
 
-**비용:** Claude Haiku 기준 1회 판단 약 $0.001 미만 → 월 $0.5~1 수준  
-**신규 가입 시 $5 무료 크레딧 제공**
+명칭 기준은 [docs/naming-convention.md](/Users/hoisung/Downloads/kospi_trading_system/docs/naming-convention.md)에 정리되어 있습니다.
 
-1. [console.anthropic.com](https://console.anthropic.com) 접속 → 회원가입
-2. 좌측 메뉴 **API Keys** → **Create Key**
-3. 생성된 키(`sk-ant-...`)를 복사
-4. `.env` 파일에 입력:
-   ```
-   ANTHROPIC_API_KEY=sk-ant-여기에_키_입력
-   ```
+## 운영 문서
 
-> 키를 입력하지 않으면 AI 판단 없이 지표만으로 매도합니다.
+- 시스템 지도: [docs/system-map.md](/Users/hoisung/Downloads/kospi_trading_system/docs/system-map.md)
+- 운영 런북: [docs/operations-runbook.md](/Users/hoisung/Downloads/kospi_trading_system/docs/operations-runbook.md)
+- 이력 인덱스: [docs/history-index.md](/Users/hoisung/Downloads/kospi_trading_system/docs/history-index.md)
+- 구조 로드맵: [docs/repo-structure-roadmap.md](/Users/hoisung/Downloads/kospi_trading_system/docs/repo-structure-roadmap.md)
 
----
+## 주의
 
-## 텔레그램 알림 설정 (선택)
-
-1. 텔레그램에서 [@BotFather](https://t.me/BotFather) 대화
-2. `/newbot` 입력 → 봇 이름 설정 → 토큰 발급
-3. [@userinfobot](https://t.me/userinfobot) 에서 본인 채팅 ID 확인
-4. `.env` 파일에 입력:
-   ```
-   TELEGRAM_TOKEN=발급받은_토큰
-   TELEGRAM_CHAT_ID=본인_채팅_ID
-   ```
-
----
-
-## 주의사항
-
-- 이 소프트웨어는 **투자 조언이 아닙니다**. 투자 결과에 대한 책임은 사용자 본인에게 있습니다.
-- KIS API 키는 절대 타인과 공유하지 마세요.
-- `.env` 파일은 절대 GitHub 등에 업로드하지 마세요.
-- 자동매매 특성상 예상치 못한 시장 상황에서 손실이 발생할 수 있습니다.
-
----
-
-## 라이선스
-
-MIT License — 자유롭게 사용, 수정, 배포 가능합니다.
+- 이 저장소는 리팩터링 중이라 로컬 워크스페이스와 운영 서버가 동일하지 않을 수 있습니다.
+- 실제 운영 서버 변경은 로컬 수정과 별도로 배포해야 합니다.
+- 실거래 전환 전에는 반드시 모의투자 기준으로 계좌, 주문, 체결, 잔고 동기화를 검증해야 합니다.

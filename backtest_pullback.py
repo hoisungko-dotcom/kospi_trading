@@ -16,9 +16,9 @@ load_dotenv()
 
 import FinanceDataReader as fdr
 sys.path.insert(0, '/home/ubuntu/kospi_trading_system')
-from core.signal_analyzer_kospi import SignalAnalyzerKospi
+from strategy.signal_analyzer import SignalAnalyzerKospi
 from core.investor_flow import InvestorFlow
-from core.risk_management import RiskManagement
+from strategy.risk import RiskManagement
 
 INITIAL = 10_000_000
 DAYS    = 90
@@ -190,7 +190,7 @@ def main():
     print(f"{'='*60}\n")
 
     from core.market_data_kospi import MarketDataKOSPI
-    from core.api_client import KISClient
+    from brokers.kis.api_client import KISClient
     client = KISClient(); client.authenticate()
     md     = MarketDataKOSPI(client)
     analyzer = SignalAnalyzerKospi()
