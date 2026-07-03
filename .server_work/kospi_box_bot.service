@@ -1,0 +1,16 @@
+[Unit]
+Description=KOSPI BOX Bot - 모의투자
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/kospi_box_bot
+ExecStart=/home/ubuntu/kospi_box_bot/venv/bin/python -m realtime.daily_runner --delay 0.15
+Restart=on-failure
+RestartSec=30
+StandardOutput=append:/home/ubuntu/kospi_box_bot/logs/runner.log
+StandardError=append:/home/ubuntu/kospi_box_bot/logs/runner.log
+
+[Install]
+WantedBy=multi-user.target

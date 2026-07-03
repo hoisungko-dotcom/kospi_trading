@@ -1,0 +1,472 @@
+[
+  {
+    "category": "journal_reviews",
+    "relative_path": "journal/20260623_ai_review.md",
+    "filename": "20260623_ai_review.md"
+  },
+  {
+    "category": "journal_reviews",
+    "relative_path": "journal/20260624_ai_review.md",
+    "filename": "20260624_ai_review.md"
+  },
+  {
+    "category": "journal_reviews",
+    "relative_path": "journal/20260625_ai_review.md",
+    "filename": "20260625_ai_review.md"
+  },
+  {
+    "category": "journal_reviews",
+    "relative_path": "journal/20260626_ai_review.md",
+    "filename": "20260626_ai_review.md"
+  },
+  {
+    "category": "journal_reviews",
+    "relative_path": "journal/20260627_ai_review.md",
+    "filename": "20260627_ai_review.md"
+  },
+  {
+    "category": "journal_reviews",
+    "relative_path": "journal/20260628_ai_review.md",
+    "filename": "20260628_ai_review.md"
+  },
+  {
+    "category": "journal_reviews",
+    "relative_path": "journal/20260629_ai_review.md",
+    "filename": "20260629_ai_review.md"
+  },
+  {
+    "category": "journal_reviews",
+    "relative_path": "journal/20260630_ai_review.md",
+    "filename": "20260630_ai_review.md"
+  },
+  {
+    "category": "journal_reviews",
+    "relative_path": "journal/20260701_ai_review.md",
+    "filename": "20260701_ai_review.md"
+  },
+  {
+    "category": "journal_changes",
+    "relative_path": "journal/20260623_ai_changes.json",
+    "filename": "20260623_ai_changes.json"
+  },
+  {
+    "category": "journal_changes",
+    "relative_path": "journal/20260624_ai_changes.json",
+    "filename": "20260624_ai_changes.json"
+  },
+  {
+    "category": "journal_changes",
+    "relative_path": "journal/20260625_ai_changes.json",
+    "filename": "20260625_ai_changes.json"
+  },
+  {
+    "category": "journal_changes",
+    "relative_path": "journal/20260626_ai_changes.json",
+    "filename": "20260626_ai_changes.json"
+  },
+  {
+    "category": "journal_changes",
+    "relative_path": "journal/20260627_ai_changes.json",
+    "filename": "20260627_ai_changes.json"
+  },
+  {
+    "category": "journal_changes",
+    "relative_path": "journal/20260628_ai_changes.json",
+    "filename": "20260628_ai_changes.json"
+  },
+  {
+    "category": "journal_changes",
+    "relative_path": "journal/20260629_ai_changes.json",
+    "filename": "20260629_ai_changes.json"
+  },
+  {
+    "category": "journal_changes",
+    "relative_path": "journal/20260630_ai_changes.json",
+    "filename": "20260630_ai_changes.json"
+  },
+  {
+    "category": "journal_changes",
+    "relative_path": "journal/20260701_ai_changes.json",
+    "filename": "20260701_ai_changes.json"
+  },
+  {
+    "category": "journal_strategy",
+    "relative_path": "journal/strategy_evolution_board.md",
+    "filename": "strategy_evolution_board.md"
+  },
+  {
+    "category": "journal_strategy",
+    "relative_path": "journal/strategy_evolution_ledger.json",
+    "filename": "strategy_evolution_ledger.json"
+  },
+  {
+    "category": "journal_active_profile",
+    "relative_path": "journal/active_strategy_profile.json",
+    "filename": "active_strategy_profile.json"
+  },
+  {
+    "category": "account_migrations",
+    "relative_path": "data/account_migrations/20260701_172337_pre_kiwoom_migration.json",
+    "filename": "20260701_172337_pre_kiwoom_migration.json"
+  },
+  {
+    "category": "runtime_state",
+    "relative_path": "data/paper_state.json",
+    "filename": "paper_state.json"
+  },
+  {
+    "category": "runtime_state",
+    "relative_path": "data/realtime_runtime.json",
+    "filename": "realtime_runtime.json"
+  },
+  {
+    "category": "runtime_state",
+    "relative_path": "data/kiwoom_mock_account_state.json",
+    "filename": "kiwoom_mock_account_state.json"
+  },
+  {
+    "category": "runtime_state",
+    "relative_path": "data/kiwoom_token_cache.json",
+    "filename": "kiwoom_token_cache.json"
+  },
+  {
+    "category": "patterns",
+    "relative_path": "data/patterns/clusters.json",
+    "filename": "clusters.json"
+  },
+  {
+    "category": "patterns",
+    "relative_path": "data/patterns/clusters_k16.json",
+    "filename": "clusters_k16.json"
+  },
+  {
+    "category": "patterns",
+    "relative_path": "data/patterns/exit_analysis.json",
+    "filename": "exit_analysis.json"
+  },
+  {
+    "category": "patterns",
+    "relative_path": "data/patterns/surge_patterns.jsonl",
+    "filename": "surge_patterns.jsonl"
+  },
+  {
+    "category": "backtest_cache",
+    "relative_path": "data/bt_cache/000270.json",
+    "filename": "000270.json"
+  },
+  {
+    "category": "backtest_cache",
+    "relative_path": "data/bt_cache/000660.json",
+    "filename": "000660.json"
+  },
+  {
+    "category": "backtest_cache",
+    "relative_path": "data/bt_cache/000720.json",
+    "filename": "000720.json"
+  },
+  {
+    "category": "backtest_cache",
+    "relative_path": "data/bt_cache/000990.json",
+    "filename": "000990.json"
+  },
+  {
+    "category": "backtest_cache",
+    "relative_path": "data/bt_cache/003230.json",
+    "filename": "003230.json"
+  },
+  {
+    "category": "backtest_cache",
+    "relative_path": "data/bt_cache/003550.json",
+    "filename": "003550.json"
+  },
+  {
+    "category": "backtest_cache",
+    "relative_path": "data/bt_cache/003670.json",
+    "filename": "003670.json"
+  },
+  {
+    "category": "backtest_cache",
+    "relative_path": "data/bt_cache/005290.json",
+    "filename": "005290.json"
+  },
+  {
+    "category": "backtest_cache",
+    "relative_path": "data/bt_cache/005380.json",
+    "filename": "005380.json"
+  },
+  {
+    "category": "backtest_cache",
+    "relative_path": "data/bt_cache/005490.json",
+    "filename": "005490.json"
+  },
+  {
+    "category": "backtest_cache",
+    "relative_path": "data/bt_cache/005830.json",
+    "filename": "005830.json"
+  },
+  {
+    "category": "backtest_cache",
+    "relative_path": "data/bt_cache/005930.json",
+    "filename": "005930.json"
+  },
+  {
+    "category": "backtest_cache",
+    "relative_path": "data/bt_cache/005935.json",
+    "filename": "005935.json"
+  },
+  {
+    "category": "backtest_cache",
+    "relative_path": "data/bt_cache/006800.json",
+    "filename": "006800.json"
+  },
+  {
+    "category": "backtest_cache",
+    "relative_path": "data/bt_cache/007660.json",
+    "filename": "007660.json"
+  },
+  {
+    "category": "backtest_cache",
+    "relative_path": "data/bt_cache/009540.json",
+    "filename": "009540.json"
+  },
+  {
+    "category": "backtest_cache",
+    "relative_path": "data/bt_cache/010120.json",
+    "filename": "010120.json"
+  },
+  {
+    "category": "backtest_cache",
+    "relative_path": "data/bt_cache/010130.json",
+    "filename": "010130.json"
+  },
+  {
+    "category": "backtest_cache",
+    "relative_path": "data/bt_cache/012330.json",
+    "filename": "012330.json"
+  },
+  {
+    "category": "backtest_cache",
+    "relative_path": "data/bt_cache/012450.json",
+    "filename": "012450.json"
+  },
+  {
+    "category": "backtest_cache",
+    "relative_path": "data/bt_cache/015760.json",
+    "filename": "015760.json"
+  },
+  {
+    "category": "backtest_cache",
+    "relative_path": "data/bt_cache/016360.json",
+    "filename": "016360.json"
+  },
+  {
+    "category": "backtest_cache",
+    "relative_path": "data/bt_cache/017670.json",
+    "filename": "017670.json"
+  },
+  {
+    "category": "backtest_cache",
+    "relative_path": "data/bt_cache/018260.json",
+    "filename": "018260.json"
+  },
+  {
+    "category": "backtest_cache",
+    "relative_path": "data/bt_cache/021240.json",
+    "filename": "021240.json"
+  },
+  {
+    "category": "backtest_cache",
+    "relative_path": "data/bt_cache/024110.json",
+    "filename": "024110.json"
+  },
+  {
+    "category": "backtest_cache",
+    "relative_path": "data/bt_cache/028050.json",
+    "filename": "028050.json"
+  },
+  {
+    "category": "backtest_cache",
+    "relative_path": "data/bt_cache/028260.json",
+    "filename": "028260.json"
+  },
+  {
+    "category": "backtest_cache",
+    "relative_path": "data/bt_cache/030200.json",
+    "filename": "030200.json"
+  },
+  {
+    "category": "backtest_cache",
+    "relative_path": "data/bt_cache/032640.json",
+    "filename": "032640.json"
+  },
+  {
+    "category": "backtest_cache",
+    "relative_path": "data/bt_cache/032830.json",
+    "filename": "032830.json"
+  },
+  {
+    "category": "backtest_cache",
+    "relative_path": "data/bt_cache/034020.json",
+    "filename": "034020.json"
+  },
+  {
+    "category": "backtest_cache",
+    "relative_path": "data/bt_cache/034730.json",
+    "filename": "034730.json"
+  },
+  {
+    "category": "backtest_cache",
+    "relative_path": "data/bt_cache/035420.json",
+    "filename": "035420.json"
+  },
+  {
+    "category": "backtest_cache",
+    "relative_path": "data/bt_cache/039030.json",
+    "filename": "039030.json"
+  },
+  {
+    "category": "backtest_cache",
+    "relative_path": "data/bt_cache/042660.json",
+    "filename": "042660.json"
+  },
+  {
+    "category": "backtest_cache",
+    "relative_path": "data/bt_cache/042700.json",
+    "filename": "042700.json"
+  },
+  {
+    "category": "backtest_cache",
+    "relative_path": "data/bt_cache/047810.json",
+    "filename": "047810.json"
+  },
+  {
+    "category": "backtest_cache",
+    "relative_path": "data/bt_cache/055550.json",
+    "filename": "055550.json"
+  },
+  {
+    "category": "backtest_cache",
+    "relative_path": "data/bt_cache/058470.json",
+    "filename": "058470.json"
+  },
+  {
+    "category": "backtest_cache",
+    "relative_path": "data/bt_cache/058610.json",
+    "filename": "058610.json"
+  },
+  {
+    "category": "backtest_cache",
+    "relative_path": "data/bt_cache/064350.json",
+    "filename": "064350.json"
+  },
+  {
+    "category": "backtest_cache",
+    "relative_path": "data/bt_cache/064400.json",
+    "filename": "064400.json"
+  },
+  {
+    "category": "backtest_cache",
+    "relative_path": "data/bt_cache/064760.json",
+    "filename": "064760.json"
+  },
+  {
+    "category": "backtest_cache",
+    "relative_path": "data/bt_cache/066570.json",
+    "filename": "066570.json"
+  },
+  {
+    "category": "backtest_cache",
+    "relative_path": "data/bt_cache/068270.json",
+    "filename": "068270.json"
+  },
+  {
+    "category": "backtest_cache",
+    "relative_path": "data/bt_cache/071050.json",
+    "filename": "071050.json"
+  },
+  {
+    "category": "backtest_cache",
+    "relative_path": "data/bt_cache/078930.json",
+    "filename": "078930.json"
+  },
+  {
+    "category": "backtest_cache",
+    "relative_path": "data/bt_cache/079550.json",
+    "filename": "079550.json"
+  },
+  {
+    "category": "backtest_cache",
+    "relative_path": "data/bt_cache/141080.json",
+    "filename": "141080.json"
+  },
+  {
+    "category": "backtest_cache",
+    "relative_path": "data/bt_cache/145020.json",
+    "filename": "145020.json"
+  },
+  {
+    "category": "backtest_cache",
+    "relative_path": "data/bt_cache/214150.json",
+    "filename": "214150.json"
+  },
+  {
+    "category": "backtest_cache",
+    "relative_path": "data/bt_cache/214450.json",
+    "filename": "214450.json"
+  },
+  {
+    "category": "backtest_cache",
+    "relative_path": "data/bt_cache/237690.json",
+    "filename": "237690.json"
+  },
+  {
+    "category": "backtest_cache",
+    "relative_path": "data/bt_cache/241560.json",
+    "filename": "241560.json"
+  },
+  {
+    "category": "backtest_cache",
+    "relative_path": "data/bt_cache/247540.json",
+    "filename": "247540.json"
+  },
+  {
+    "category": "backtest_cache",
+    "relative_path": "data/bt_cache/267250.json",
+    "filename": "267250.json"
+  },
+  {
+    "category": "backtest_cache",
+    "relative_path": "data/bt_cache/267260.json",
+    "filename": "267260.json"
+  },
+  {
+    "category": "backtest_cache",
+    "relative_path": "data/bt_cache/272210.json",
+    "filename": "272210.json"
+  },
+  {
+    "category": "backtest_cache",
+    "relative_path": "data/bt_cache/277810.json",
+    "filename": "277810.json"
+  },
+  {
+    "category": "backtest_cache",
+    "relative_path": "data/bt_cache/307950.json",
+    "filename": "307950.json"
+  },
+  {
+    "category": "backtest_cache",
+    "relative_path": "data/bt_cache/319660.json",
+    "filename": "319660.json"
+  },
+  {
+    "category": "backtest_cache",
+    "relative_path": "data/bt_cache/357780.json",
+    "filename": "357780.json"
+  },
+  {
+    "category": "backtest_cache",
+    "relative_path": "data/bt_cache/443060.json",
+    "filename": "443060.json"
+  }
+]
